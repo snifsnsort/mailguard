@@ -5,7 +5,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green)](https://fastapi.tiangolo.com)
 [![React](https://img.shields.io/badge/React-18-61DAFB)](https://react.dev)
 
-MailGuard is an open-source email security posture management tool that continuously audits Microsoft 365 and Google Workspace tenants for misconfigurations, policy gaps, and typosquatting threats.
+MailGuard is a free email security posture management tool that continuously audits Microsoft 365 and Google Workspace tenants for misconfigurations, policy gaps, and typosquatting threats.
 
 ---
 

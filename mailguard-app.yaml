@@ -1,0 +1,143 @@
+id: /subscriptions/2103cbf5-d7fa-46c3-b24b-5843041bf531/resourceGroups/mailguard-rg/providers/Microsoft.App/containerapps/mailguard-app
+identity:
+  type: None
+location: East US
+name: mailguard-app
+properties:
+  configuration:
+    activeRevisionsMode: Single
+    dapr: null
+    identitySettings: []
+    ingress:
+      additionalPortMappings: null
+      allowInsecure: false
+      clientCertificateMode: Ignore
+      corsPolicy: null
+      customDomains: null
+      exposedPort: 0
+      external: true
+      fqdn: mailguard-app.delightfulbay-570d5fba.eastus.azurecontainerapps.io
+      ipSecurityRestrictions: null
+      stickySessions:
+        affinity: none
+      targetPort: 8000
+      traffic:
+      - latestRevision: true
+        weight: 100
+      transport: Auto
+    maxInactiveRevisions: 100
+    registries:
+    - identity: ''
+      passwordSecretRef: acr-password
+      server: mailguardacr7842.azurecr.io
+      username: mailguardacr7842
+    runtime: null
+    secrets:
+    - name: mg-redirect-uri
+    - name: allowed-origins
+    - name: database-url
+    - name: gws-client-id
+    - name: seed-tenant-id
+    - name: secret-key
+    - name: acr-password
+    - name: mg-client-secret
+    - name: encryption-key
+    - name: seed-tenant-name
+    - name: gws-redirect-uri
+    - name: clerk-secret-key
+    - name: seed-client-id
+    - name: seed-tenant-domain
+    - name: gws-client-secret
+    - name: mg-client-id
+    - name: seed-client-secret
+    - name: debug-flag
+    service: null
+  customDomainVerificationId: 723D258F58DB7B71953CE4AAD81C4EB7100A0DE84D7CB2330AD8531D90F73ABA
+  delegatedIdentities: []
+  environmentId: /subscriptions/2103cbf5-d7fa-46c3-b24b-5843041bf531/resourceGroups/mailguard-rg/providers/Microsoft.App/managedEnvironments/mailguard-env
+  eventStreamEndpoint: https://eastus.azurecontainerapps.dev/subscriptions/2103cbf5-d7fa-46c3-b24b-5843041bf531/resourceGroups/mailguard-rg/containerApps/mailguard-app/eventstream
+  latestReadyRevisionName: mailguard-app--0000096
+  latestRevisionFqdn: mailguard-app--0000096.delightfulbay-570d5fba.eastus.azurecontainerapps.io
+  latestRevisionName: mailguard-app--0000096
+  managedEnvironmentId: /subscriptions/2103cbf5-d7fa-46c3-b24b-5843041bf531/resourceGroups/mailguard-rg/providers/Microsoft.App/managedEnvironments/mailguard-env
+  outboundIpAddresses:
+  - 104.45.181.27
+  provisioningState: Succeeded
+  runningStatus: Running
+  template:
+    containers:
+    - env:
+      - name: SECRET_KEY
+        secretRef: secret-key
+      - name: ENCRYPTION_KEY
+        secretRef: encryption-key
+      - name: DATABASE_URL
+        secretRef: database-url
+      - name: ALLOWED_ORIGINS
+        secretRef: allowed-origins
+      - name: DEBUG
+        secretRef: debug-flag
+      - name: SEED_TENANT_NAME
+        secretRef: seed-tenant-name
+      - name: SEED_TENANT_ID
+        secretRef: seed-tenant-id
+      - name: SEED_TENANT_DOMAIN
+        secretRef: seed-tenant-domain
+      - name: SEED_CLIENT_ID
+        secretRef: seed-client-id
+      - name: SEED_CLIENT_SECRET
+        secretRef: seed-client-secret
+      - name: MAILGUARD_CLIENT_ID
+        secretRef: mg-client-id
+      - name: MAILGUARD_CLIENT_SECRET
+        secretRef: mg-client-secret
+      - name: MAILGUARD_REDIRECT_URI
+        secretRef: mg-redirect-uri
+      - name: DEPLOY_TIME
+        value: 2026-03-04T21:00
+      - name: MULTI_TENANT_MODE
+        value: 'false'
+      - name: CLERK_SECRET_KEY
+        secretRef: clerk-secret-key
+      - name: GWS_CLIENT_ID
+        secretRef: gws-client-id
+      - name: GWS_CLIENT_SECRET
+        secretRef: gws-client-secret
+      - name: GWS_REDIRECT_URI
+        secretRef: gws-redirect-uri
+volumeMounts:
+  - mountPath: /app/backend
+    volumeName: mailguard-vol
+      image: mailguardacr7842.azurecr.io/mailguard:latest
+      name: mailguard
+      resources:
+        cpu: 0.5
+        ephemeralStorage: 2Gi
+        memory: 1Gi
+    initContainers: null
+    revisionSuffix: ''
+    scale:
+      cooldownPeriod: 300
+      maxReplicas: 1
+      minReplicas: 1
+      pollingInterval: 30
+      rules: null
+    serviceBinds: null
+    terminationGracePeriodSeconds: null
+    volumes:
+    - name: mailguard-vol
+      storageName: mailguard-storage
+      storageType: AzureFile
+  workloadProfileName: null
+resourceGroup: mailguard-rg
+systemData:
+  createdAt: '2026-02-24T01:11:48.9182891'
+  createdBy: g1user@gmail.com
+  createdByType: User
+  lastModifiedAt: '2026-03-05T05:33:26.7683927'
+  lastModifiedBy: g1user@gmail.com
+  lastModifiedByType: User
+tags:
+  app: mailguard
+  managed_by: terraform
+type: Microsoft.App/containerApps

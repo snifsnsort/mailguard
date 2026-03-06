@@ -1,0 +1,7 @@
+# Copy this to terraform.tfvars and fill in your values
+# terraform.tfvars is in .gitignore — never commit secrets
+
+location = "eastus"
+prefix   = "mailguard"
+acr_name = "mailguardacr"    # Must be globally unique across all Azure
+image_tag = "latest"

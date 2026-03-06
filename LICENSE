@@ -1,0 +1,49 @@
+Copyright (c) 2026 MailGuard. All rights reserved.
+
+DISCLAIMER OF LIABILITY
+
+THIS SOFTWARE IS PROVIDED FOR INFORMATIONAL AND OPERATIONAL ASSISTANCE PURPOSES
+ONLY. IT DOES NOT CONSTITUTE LEGAL, COMPLIANCE, OR SECURITY ADVICE. THE RESULTS
+PRODUCED BY THIS SOFTWARE REFLECT CONFIGURATION DATA AT THE TIME OF THE SCAN AND
+MAY NOT REPRESENT A COMPLETE OR CURRENT ASSESSMENT OF YOUR SECURITY POSTURE.
+
+THE AUTHORS AND COPYRIGHT HOLDERS SHALL NOT BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING FROM THE USE OF
+THIS SOFTWARE, INCLUDING BUT NOT LIMITED TO:
+
+  - SECURITY INCIDENTS, DATA BREACHES, OR UNAUTHORIZED ACCESS THAT OCCUR
+    REGARDLESS OF WHETHER THIS SOFTWARE REPORTED A PASS OR FAIL ON ANY CHECK
+  - RELIANCE ON SCAN RESULTS AS A SUBSTITUTE FOR PROFESSIONAL SECURITY REVIEW
+  - MISCONFIGURATIONS THAT THIS SOFTWARE FAILED TO DETECT
+  - ACTIONS TAKEN OR NOT TAKEN BASED ON THE OUTPUT OF THIS SOFTWARE
+
+ORGANIZATIONS ARE SOLELY RESPONSIBLE FOR THEIR OWN SECURITY POSTURE AND
+COMPLIANCE OBLIGATIONS. USE OF THIS SOFTWARE DOES NOT GUARANTEE COMPLIANCE WITH
+ANY REGULATION, STANDARD, OR POLICY (INCLUDING BUT NOT LIMITED TO GDPR, HIPAA,
+ISO 27001, SOC 2, OR ANY OTHER FRAMEWORK).
+
+TERMS OF USE
+
+Permission is hereby granted, free of charge, to any person or organization to
+use and run this Software for internal business purposes, subject to the
+following conditions:
+
+1. The Software may not be copied, modified, merged, published, distributed,
+   sublicensed, or sold without explicit written permission from the copyright
+   holder.
+
+2. The Software may not be used to build or offer a competing product or
+   service without explicit written permission from the copyright holder.
+
+3. Contributions submitted to this repository grant the copyright holder a
+   perpetual, irrevocable, royalty-free license to use, modify, and distribute
+   the contributed code as part of this Software.
+
+4. This license notice and disclaimer must be included in all copies or
+   substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+For licensing inquiries contact: [your contact email]

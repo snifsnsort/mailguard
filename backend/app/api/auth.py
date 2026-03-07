@@ -20,7 +20,7 @@ from app.core.database import get_db
 
 router = APIRouter()
 
-DEFAULT_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+DEFAULT_USERNAME = os.environ.get("ADMIN_USERNAME", "admin").lower()
 DEFAULT_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme")
 SECRET_KEY       = os.environ.get("SECRET_KEY", "change-me-in-production")
 TOKEN_TTL_HOURS  = 24 * 7  # 7 days
@@ -70,15 +70,19 @@ def _get_stored_password(db: Session) -> Optional[str]:
 
 def _set_stored_password(db: Session, password: str):
     from app.models.setting import Setting
-    s = db.query(Setting).filter(Setting.key == "admin_password_hash").first()
-    if s:
-        s.value = _hash_password(password)
-    else:
-        db.add(Setting(key="admin_password_hash", value=_hash_password(password)))
-    db.commit()
+    try:
+        s = db.query(Setting).filter(Setting.key == "admin_password_hash").first()
+        if s:
+            s.value = _hash_password(password)
+        else:
+            db.add(Setting(key="admin_password_hash", value=_hash_password(password)))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise e
 
 
-# ── Auth dependency for other routes ─────────────────────────────────────────
+# — Auth dependency for other routes ————————————————————
 
 def get_current_user(authorization: Optional[str] = Header(default=None)) -> Optional[str]:
     if not authorization or not authorization.startswith("Bearer "):
@@ -86,7 +90,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> Opt
     return _verify_token(authorization.split(" ", 1)[1])
 
 
-# ── Request models ────────────────────────────────────────────────────────────
+# — Request models ——————————————————————————————————————
 
 class LoginRequest(BaseModel):
     username: str
@@ -97,11 +101,11 @@ class ChangePasswordRequest(BaseModel):
     new_password: str
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# — Routes ——————————————————————————————————————————————
 
 @router.post("/login")
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
-    if payload.username != DEFAULT_USERNAME:
+    if payload.username.lower() != DEFAULT_USERNAME:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     stored_hash = _get_stored_password(db)
@@ -113,8 +117,6 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     else:
         if payload.password != DEFAULT_PASSWORD:
             raise HTTPException(status_code=401, detail="Invalid username or password")
-        # Only force password change if still using the hardcoded default "changeme".
-        # If ADMIN_PASSWORD was set in env vars to something custom, treat it as already set.
         hardcoded_default = "changeme"
         must_change = (payload.password == hardcoded_default)
         return {"token": _make_token(payload.username), "must_change_password": must_change}

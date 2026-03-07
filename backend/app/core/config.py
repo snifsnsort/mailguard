@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 
 
 class Settings(BaseSettings):
@@ -8,18 +8,33 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     SECRET_KEY: str = "change-me-in-production"
 
-    # CORS - accepts either "*" or comma-separated origins
+    # Admin
+    ADMIN_PASSWORD: str = ""
+
+    # CORS
     ALLOWED_ORIGINS: str = "http://localhost:5173,http://localhost:8000"
 
-    # Encryption key for storing tenant client secrets at rest (Fernet)
+    # Encryption
     ENCRYPTION_KEY: str = ""
 
     # Database
     DATABASE_URL: str = "sqlite:////tmp/mailguard.db"
 
-    # Multi-tenant SaaS mode — stored as str to tolerate empty-string env vars.
-    # Azure sets unset booleans as "" which pydantic v2 rejects for bool fields.
+    # Multi-tenant
     MULTI_TENANT_MODE: str = "false"
+
+    # Seed tenant
+    SEED_TENANT_NAME: str = ""
+    SEED_TENANT_DOMAIN: str = ""
+    SEED_TENANT_ID: str = ""
+    SEED_CLIENT_ID: str = ""
+    SEED_CLIENT_SECRET: str = ""
+    SEED_GWS_REFRESH_TOKEN: str = ""
+
+    # Google OAuth
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/google/callback"
 
     @property
     def multi_tenant_mode(self) -> bool:
@@ -33,6 +48,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
 
 settings = Settings()

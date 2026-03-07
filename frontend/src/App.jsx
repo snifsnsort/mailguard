@@ -96,7 +96,7 @@ export default function App() {
   const path = window.location.pathname
   if (path === '/connect' || path === '/onboard' || path === '/start') return <Connect />
 
-  // Not logged in — show login page
+  // Not logged in â show login page
   if (!authToken) {
     return <LoginPage onLogin={handleLogin} />
   }
@@ -125,6 +125,19 @@ export default function App() {
         </Routes>
       </main>
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} onAdded={handleTenantAdded} />}
+      {notification && (
+        <div style={{
+          position: 'fixed', top: 20, right: 20, zIndex: 9999,
+          background: notification.type === 'error' ? '#7f1d1d' : '#14532d',
+          border: `1px solid ${notification.type === 'error' ? '#ef4444' : '#22c55e'}`,
+          color: '#fff', padding: '12px 20px', borderRadius: 10,
+          maxWidth: 420, fontSize: 14, lineHeight: 1.5,
+          display: 'flex', alignItems: 'flex-start', gap: 10
+        }}>
+          <span style={{ flex: 1 }}>{notification.msg}</span>
+          <button onClick={() => setNotification(null)} style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 16, padding: 0, lineHeight: 1 }}>×</button>
+        </div>
+      )}
     </div>
   )
 }

@@ -11,44 +11,15 @@ import LoginPage from './pages/LoginPage'
 import { api } from './utils/api'
 
 export default function App() {
-  const [tenants, setTenants] = useState([])
+  const [tenants, setTenants]           = useState([])
   const [activeTenant, setActiveTenant] = useState(null)
-  const [lastScan, setLastScan] = useState(null)
-  const [scanning, setScanning] = useState(false)
-  const [showConnect, setShowConnect] = useState(false)
-  const [authToken, setAuthToken] = useState(() => localStorage.getItem('mg_token'))
+  const [lastScan, setLastScan]         = useState(null)
+  const [scanning, setScanning]         = useState(false)
+  const [showConnect, setShowConnect]   = useState(false)
+  const [authToken, setAuthToken]       = useState(() => localStorage.getItem('mg_token'))
   const [mustChangePassword, setMustChangePassword] = useState(false)
-  const [loadingScan, setLoadingScan] = useState(false)
-  const [notification, setNotification] = useState(null)
+  const [loadingScan, setLoadingScan]   = useState(false)
   const navigate = useNavigate()
-
-  // Handle OAuth redirect results (M365 and Google)
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const onboardError   = params.get('onboard_error')
-    const onboardSuccess = params.get('onboard_success')
-    const gwsError       = params.get('gws_error')
-    const gwsConnected   = params.get('gws_connected')
-
-    if (onboardError === 'config_error') {
-      setNotification({ type: 'error', msg: 'M365 OAuth not configured on this server. Use the manual form or set MAILGUARD_CLIENT_ID in your .env.' })
-    } else if (onboardError) {
-      setNotification({ type: 'error', msg: 'M365 connection failed: ' + (params.get('detail') || onboardError) })
-    } else if (onboardSuccess) {
-      setNotification({ type: 'success', msg: 'Microsoft 365 tenant connected: ' + (params.get('domain') || '') })
-    } else if (gwsError === 'not_configured') {
-      setNotification({ type: 'error', msg: 'Google OAuth not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI in your .env.' })
-    } else if (gwsError) {
-      setNotification({ type: 'error', msg: 'Google Workspace connection failed: ' + gwsError })
-    } else if (gwsConnected) {
-      setNotification({ type: 'success', msg: 'Google Workspace connected successfully.' })
-    }
-
-    if (onboardError || onboardSuccess || gwsError || gwsConnected) {
-      // Clean the query string from the URL without reloading
-      window.history.replaceState({}, '', window.location.pathname)
-    }
-  }, [])
 
   // Load tenants on auth
   useEffect(() => {
@@ -56,7 +27,7 @@ export default function App() {
     api.listTenants().then(ts => {
       setTenants(ts)
       if (ts.length > 0) setActiveTenant(ts[0])
-    }).catch(() => {})
+    }).catch(() => {})  // stay logged in even if tenants fail to load
   }, [authToken])
 
   // Reload last scan whenever active tenant changes
@@ -68,6 +39,7 @@ export default function App() {
       .then(async history => {
         const completed = (history || []).filter(s => s.status === 'completed')
         if (completed.length > 0) {
+          // history is sorted newest-first; fetch full result for latest
           const full = await api.scanResult(completed[0].id)
           setLastScan(full)
         }
@@ -117,22 +89,20 @@ export default function App() {
           setScanning(false)
         }
       }, 2000)
-    } catch (e) {
-      setScanning(false)
-    }
+    } catch (e) { setScanning(false) }
   }
 
   // /connect routes render fullscreen with no sidebar
   const path = window.location.pathname
-  if (path === '/connect' || path === '/onboard' || path === '/start')
-    return <Connect />
+  if (path === '/connect' || path === '/onboard' || path === '/start') return <Connect />
 
+  // Not logged in â show login page
   if (!authToken) {
     return <LoginPage onLogin={handleLogin} />
   }
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', position: 'relative', zIndex: 1 }}>
+    <div style={{display:'flex',minHeight:'100vh',position:'relative',zIndex:1}}>
       <Sidebar
         tenants={tenants}
         activeTenant={activeTenant}
@@ -143,65 +113,29 @@ export default function App() {
         mustChangePassword={mustChangePassword}
         onPasswordChanged={() => setMustChangePassword(false)}
       />
-      <main style={{ marginLeft: 220, flex: 1, minHeight: '100vh' }}>
+      <main style={{marginLeft:220,flex:1,minHeight:'100vh'}}>
         <Routes>
-          <Route path="/" element={
-            <Dashboard
-              tenant={activeTenant}
-              scan={lastScan}
-              scanning={scanning || loadingScan}
-              onScan={handleScan}
-              onAddTenant={() => setShowConnect(true)}
-              token={authToken}
-            />
-          } />
-          <Route path="/checks"        element={<Checks scan={lastScan} token={authToken} />} />
-          <Route path="/history"       element={<History tenant={activeTenant} token={authToken} />} />
+          <Route path="/"        element={<Dashboard tenant={activeTenant} scan={lastScan} scanning={scanning || loadingScan} onScan={handleScan} onAddTenant={() => setShowConnect(true)} token={authToken} />} />
+          <Route path="/checks"  element={<Checks scan={lastScan} token={authToken} />} />
+          <Route path="/history"        element={<History tenant={activeTenant} token={authToken} />} />
           <Route path="/lookalike-scan" element={<LookalikeScan token={authToken} />} />
-          <Route path="/connect"       element={<Connect />} />
-          <Route path="/onboard"       element={<Connect />} />
-          <Route path="/start"         element={<Connect />} />
+          <Route path="/connect"        element={<Connect />} />
+          <Route path="/onboard" element={<Connect />} />
+          <Route path="/start"   element={<Connect />} />
         </Routes>
       </main>
-
-      {showConnect && (
-        <ConnectModal onClose={() => setShowConnect(false)} onAdded={handleTenantAdded} />
-      )}
-
-      {/* OAuth result notification banner */}
+      {showConnect && <ConnectModal onClose={() => setShowConnect(false)} onAdded={handleTenantAdded} />}
       {notification && (
         <div style={{
-          position: 'fixed',
-          top: 20,
-          right: 20,
-          zIndex: 9999,
-          background: notification.type === 'error' ? '#450a0a' : '#052e16',
+          position: 'fixed', top: 20, right: 20, zIndex: 9999,
+          background: notification.type === 'error' ? '#7f1d1d' : '#14532d',
           border: `1px solid ${notification.type === 'error' ? '#ef4444' : '#22c55e'}`,
-          color: '#f1f5f9',
-          padding: '14px 18px',
-          borderRadius: 10,
-          maxWidth: 440,
-          fontSize: 14,
-          lineHeight: 1.5,
-          display: 'flex',
-          alignItems: 'flex-start',
-          gap: 12,
-          boxShadow: '0 4px 24px rgba(0,0,0,0.5)',
+          color: '#fff', padding: '12px 20px', borderRadius: 10,
+          maxWidth: 420, fontSize: 14, lineHeight: 1.5,
+          display: 'flex', alignItems: 'flex-start', gap: 10
         }}>
           <span style={{ flex: 1 }}>{notification.msg}</span>
-          <button
-            onClick={() => setNotification(null)}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: '#94a3b8',
-              cursor: 'pointer',
-              fontSize: 18,
-              lineHeight: 1,
-              padding: 0,
-              flexShrink: 0,
-            }}
-          >×</button>
+          <button onClick={() => setNotification(null)} style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 16, padding: 0, lineHeight: 1 }}>×</button>
         </div>
       )}
     </div>

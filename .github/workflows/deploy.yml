@@ -1,0 +1,72 @@
+name: Build & Deploy to Azure
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ secrets.ACR_NAME }}
+
+      - name: Build and push image
+        run: |
+          TAG=$(date +%Y%m%d-%H%M)
+          IMAGE=${{ secrets.ACR_NAME }}.azurecr.io/mailguard
+          docker build -t ${IMAGE}:${TAG} -t ${IMAGE}:latest .
+          docker push ${IMAGE}:${TAG}
+          docker push ${IMAGE}:latest
+          echo "IMAGE_TAG=${TAG}" >> $GITHUB_ENV
+          echo "FULL_IMAGE=${IMAGE}:${TAG}" >> $GITHUB_ENV
+
+      - name: Deactivate current revisions
+        run: |
+          REVS=$(az containerapp revision list \
+            --name ${{ secrets.CONTAINER_APP }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --query "[?properties.active].name" -o tsv)
+          for REV in $REVS; do
+            az containerapp revision deactivate \
+              --name ${{ secrets.CONTAINER_APP }} \
+              --resource-group ${{ secrets.RESOURCE_GROUP }} \
+              --revision $REV
+          done
+          sleep 15
+
+      - name: Deploy new image
+        run: |
+          az containerapp update \
+            --name ${{ secrets.CONTAINER_APP }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --image ${{ env.FULL_IMAGE }}
+
+      - name: Health check
+        run: |
+          sleep 30
+          APP_URL=https://$(az containerapp show \
+            --name ${{ secrets.CONTAINER_APP }} \
+            --resource-group ${{ secrets.RESOURCE_GROUP }} \
+            --query "properties.configuration.ingress.fqdn" -o tsv)
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${APP_URL}/api/health)
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS — waiting 15s..."
+            sleep 15
+          done
+          echo "Health check failed"
+          exit 1

@@ -2,9 +2,9 @@
 Google Workspace OAuth2 onboarding flow.
 
 Flow:
-  1. GET  /api/v1/google/connect           — redirect to Google consent screen
-  2. GET  /api/v1/google/callback          — exchange code for tokens, save tenant
-  3. POST /api/v1/google/refresh/{tenant}  — refresh access token (called by scan engine)
+  1. GET  /api/v1/google/connect           â redirect to Google consent screen
+  2. GET  /api/v1/google/callback          â exchange code for tokens, save tenant
+  3. POST /api/v1/google/refresh/{tenant}  â refresh access token (called by scan engine)
 """
 import os
 import json
@@ -22,7 +22,7 @@ from typing import Optional
 
 router = APIRouter()
 
-# ── GWS token persistence helpers ─────────────────────────────────────────────
+# ââ GWS token persistence helpers âââââââââââââââââââââââââââââââââââââââââââââ
 _DATA_DIR = "/data"
 
 def _backup_gws_token(domain: str, encrypted_token: str) -> None:
@@ -46,10 +46,10 @@ def _backup_gws_token(domain: str, encrypted_token: str) -> None:
         print(f"[gws] Warning: could not write token backup: {e}", flush=True)
 
 
-# ── Config ─────────────────────────────────────────────────────────────────────
-GWS_CLIENT_ID     = os.getenv("GWS_CLIENT_ID", "")
-GWS_CLIENT_SECRET = os.getenv("GWS_CLIENT_SECRET", "")
-GWS_REDIRECT_URI  = os.getenv("GWS_REDIRECT_URI", "")
+# ââ Config âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+GWS_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
+GWS_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GWS_REDIRECT_URI  = os.getenv("GOOGLE_REDIRECT_URI", "")
 
 GOOGLE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -75,7 +75,7 @@ def _configured() -> bool:
 async def gws_connect(request: Request):
     """Redirect browser to Google consent screen."""
     if not _configured():
-        raise HTTPException(status_code=501, detail="Google Workspace OAuth not configured. Set GWS_CLIENT_ID, GWS_CLIENT_SECRET, GWS_REDIRECT_URI.")
+        raise HTTPException(status_code=501, detail="Google Workspace OAuth not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI in your .env file.")
 
     params = {
         "client_id":     GWS_CLIENT_ID,
@@ -149,7 +149,7 @@ async def gws_callback(
     if not domain:
         return RedirectResponse(f"{frontend}/?gws_error=no_domain")
 
-    # Upsert — if a tenant with this domain already exists (e.g. M365 already connected
+    # Upsert â if a tenant with this domain already exists (e.g. M365 already connected
     # on the same domain), add GWS to it. Otherwise create a new GWS-only tenant.
     # The GWS-only tenant (e.g. cloud4you.ca) is separate from the M365 tenant (e.g. pfptdev.com).
     # restore_gws_tokens() recreates it on every boot from /data/gws_tokens.json.

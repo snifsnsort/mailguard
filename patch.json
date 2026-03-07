@@ -1,1 +1,0 @@
-{"properties":{"template":{"containers":[{"name":"mailguard","volumeMounts":[{"mountPath":"/app/backend","volumeName":"mailguard-vol"}]}]}}}

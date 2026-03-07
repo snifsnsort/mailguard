@@ -62,42 +62,36 @@ mailguard/
 │       └── utils/api.js      # API client
 ├── Dockerfile                # Multi-stage build (Node → Python)
 ├── docker-compose.yml        # Local development
-├── Build-And-Deploy.ps1      # Azure Container Apps deployment
-├── Setup-Storage.ps1         # One-time Azure File Share setup
+├── deploy.ps1                # One-command Azure deployment (first time)
+├── update.ps1                # Redeploy after code changes
 └── terraform/                # Infrastructure as code (Azure)
 ```
 
 ---
 
-## Quick Start (Local)
+## Quick Start
 
 ### Prerequisites
-- Docker Desktop
-- An Azure AD App Registration (for M365) — see [docs/M365_SETUP.md](docs/M365_SETUP.md)
-- Or a Google Cloud project (for GWS) — see [docs/GWS_SETUP.md](docs/GWS_SETUP.md)
+- [Docker Desktop](https://docker.com)
+- [Azure CLI](https://aka.ms/installazurecliwindows)
+- [PowerShell 7+](https://aka.ms/powershell)
+- An Azure subscription
 
-### 1. Clone and configure
+### Deploy to Azure (one command)
 
-```bash
-git clone https://github.com/YOUR_USERNAME/mailguard.git
+```powershell
+git clone https://github.com/snifsnsort/mailguard.git
 cd mailguard
-cp backend/.env.example backend/.env
+.\deploy.ps1
 ```
 
-Edit `backend/.env`:
+The script handles everything — Azure resources, Docker build, persistent storage, M365 setup, and opens your browser when done. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full details.
 
-```env
-SECRET_KEY=your-random-secret-key-here
-ADMIN_PASSWORD=YourSecurePassword123
-SEED_TENANT_DOMAIN=yourdomain.com
-SEED_TENANT_ID=<Azure tenant ID>
-SEED_CLIENT_ID=<Azure app client ID>
-SEED_CLIENT_SECRET=<Azure app client secret>
-```
-
-### 2. Run with Docker Compose
+### Run Locally (Docker Compose)
 
 ```bash
+cp backend/.env.example backend/.env
+# Edit backend/.env with your credentials
 docker compose up --build
 ```
 

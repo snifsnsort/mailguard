@@ -107,14 +107,17 @@ Open [http://localhost:8000](http://localhost:8000) and log in with `admin` / th
 
 ## Azure Deployment
 
-See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full Azure Container Apps guide.
+See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full guide.
 
 ```powershell
-# One-time: create persistent storage
-.\Setup-Storage.ps1
+# First time — creates all Azure resources and deploys the app
+.\deploy.ps1
 
-# Every deploy
-.\Build-And-Deploy.ps1
+# After code changes — rebuilds and redeploys
+.\update.ps1
+
+# Tear everything down
+.\deploy.ps1 -Destroy
 ```
 
 ---
@@ -154,7 +157,7 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full Azure Container Ap
 
 ## Feedback & Issues
 
-Found a bug or have a feature request? Please open a GitHub issue with a clear description. For all other inquiries including commercial licensing, contact george@cloud4you.ca.
+Found a bug or have a feature request? Please open a GitHub issue with a clear description. For all other inquiries including commercial licensing, contact [your email].
 
 ---
 

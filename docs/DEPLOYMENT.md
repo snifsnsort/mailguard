@@ -1,149 +1,109 @@
-# Deploying MailGuard to Azure Container Apps
+# Deploying MailGuard to Azure
 
-This guide covers a full deployment of MailGuard on Azure Container Apps with persistent storage for the GWS token backup.
+MailGuard deploys to Azure Container Apps with one command. The `deploy.ps1` script handles everything — no manual resource creation, no Azure Portal required.
 
 ## Prerequisites
 
-- Azure CLI installed and logged in (`az login`)
-- Docker Desktop installed
-- PowerShell 7+ (Windows) or pwsh (macOS/Linux)
-- An Azure subscription
-- An Azure Container Registry (ACR) — or create one below
+Install these three tools before running the script:
 
----
-
-## First-Time Setup
-
-### 1. Create Azure resources (one time)
-
-```powershell
-# Variables — update these
-$RG       = "mailguard-rg"
-$LOCATION = "eastus"
-$ACR      = "mailguardacr"     # must be globally unique
-$ENV      = "mailguard-env"
-$APP      = "mailguard-app"
-
-# Resource group
-az group create --name $RG --location $LOCATION
-
-# Container Registry
-az acr create --name $ACR --resource-group $RG --sku Basic --admin-enabled true
-
-# Container Apps environment
-az containerapp env create --name $ENV --resource-group $RG --location $LOCATION
-```
-
-### 2. Set up persistent storage
-
-Run this **once** to create the Azure File Share that stores `gws_tokens.json`:
-
-```powershell
-.\Setup-Storage.ps1
-```
-
-This creates a Storage Account, file share, and links it to the Container Apps environment at `/data`.
-
-### 3. Create the Container App with environment variables
-
-```powershell
-az containerapp create `
-  --name $APP `
-  --resource-group $RG `
-  --environment $ENV `
-  --image mcr.microsoft.com/azuredocs/containerapps-helloworld:latest `
-  --target-port 8000 `
-  --ingress external `
-  --env-vars `
-    SECRET_KEY="your-random-secret" `
-    ADMIN_PASSWORD="YourPassword123" `
-    SEED_TENANT_DOMAIN="yourdomain.com" `
-    SEED_TENANT_ID="<azure-tenant-id>" `
-    SEED_CLIENT_ID="<app-client-id>" `
-    SEED_CLIENT_SECRET="<app-client-secret>"
-```
-
-### 4. Deploy the application
-
-```powershell
-.\Build-And-Deploy.ps1
-```
-
----
-
-## Ongoing Deployments
-
-Every time you update the code:
-
-```powershell
-.\Build-And-Deploy.ps1
-```
-
-This will:
-1. Build the Docker image with a timestamp tag
-2. Push it to ACR
-3. Deactivate the old revision
-4. Update the Container App to use the new image
-
----
-
-## Environment Variables Reference
-
-Set these in the Azure Portal under **Container App → Environment variables** or pass them in the `az containerapp create` command.
-
-| Variable | Description |
+| Tool | Download |
 |---|---|
-| `SECRET_KEY` | Long random string used for JWT signing and GWS token encryption |
-| `ADMIN_PASSWORD` | Login password for the `admin` account |
-| `SEED_TENANT_DOMAIN` | Your M365 domain (e.g. `contoso.com`) |
-| `SEED_TENANT_ID` | Azure AD tenant GUID |
-| `SEED_CLIENT_ID` | App Registration client ID |
-| `SEED_CLIENT_SECRET` | App Registration client secret |
-| `MULTI_TENANT_MODE` | Set to `true` to enable multiple tenant management |
+| Docker Desktop | https://docker.com |
+| Azure CLI | https://aka.ms/installazurecliwindows |
+| PowerShell 7+ | https://aka.ms/powershell |
 
 ---
 
-## Updating Environment Variables
+## First-Time Deployment
 
-In the Azure Portal:
-1. Go to **Container Apps → mailguard-app → Containers**
-2. Click **Edit and deploy**
-3. Click the container name
-4. Edit environment variables
-5. Save and deploy
-
-Or via CLI:
 ```powershell
-az containerapp update `
-  --name mailguard-app `
-  --resource-group mailguard-rg `
-  --set-env-vars "ADMIN_PASSWORD=NewPassword123"
+git clone https://github.com/snifsnsort/mailguard.git
+cd mailguard
+.\deploy.ps1
+```
+
+The script will:
+1. Sign you into Azure (opens browser)
+2. Let you pick your subscription
+3. Ask for a dashboard password
+4. Ask whether to create the M365 App Registration automatically or use existing credentials
+5. Create all Azure resources (Resource Group, Container Registry, Container Apps Environment, Storage Account)
+6. Build and push the Docker image
+7. Deploy the app with all environment variables configured
+8. Mount persistent storage at `/data` for GWS token backup
+9. Run a health check
+10. Open MailGuard in your browser
+
+**Total time: approximately 10-15 minutes** (most of that is the Docker build on first run).
+
+---
+
+## Updating After Code Changes
+
+Every time you pull new code from GitHub:
+
+```powershell
+cd mailguard
+.\update.ps1
+```
+
+No configuration needed — `update.ps1` reads `deployment-info.json` saved by `deploy.ps1` and knows exactly where to deploy.
+
+---
+
+## Setting Up the M365 App Registration
+
+If you chose to skip M365 setup during deployment, run this separately:
+
+```powershell
+.\scripts\Setup-AppRegistration.ps1
+```
+
+This creates an Azure AD App Registration in your Microsoft 365 tenant with all required permissions and prints the credentials to paste into MailGuard.
+
+Requires: Global Administrator in your M365 tenant.
+
+---
+
+## Connecting Google Workspace
+
+After deployment:
+1. Log into MailGuard
+2. Click **+ Google Workspace** in the sidebar
+3. Complete the OAuth flow in your browser
+
+The GWS refresh token is encrypted and backed up to the persistent Azure File Share at `/data/gws_tokens.json`. It survives all future `.\update.ps1` deployments automatically.
+
+---
+
+## Tearing Down
+
+To delete all Azure resources:
+
+```powershell
+.\deploy.ps1 -Destroy
 ```
 
 ---
 
-## Viewing Logs
+## Deploying to a Different Azure Region
 
 ```powershell
-az containerapp logs show `
-  --name mailguard-app `
-  --resource-group mailguard-rg `
-  --follow
+.\deploy.ps1 -Location "westeurope"
 ```
+
+Available locations: `eastus`, `westeurope`, `australiaeast`, `uksouth`, `canadacentral`, etc.
 
 ---
 
 ## Troubleshooting
 
-**Container won't start:** Check logs with the command above. Common causes:
-- Missing required environment variable
-- Database lock (shouldn't happen — DB is on `/tmp`)
-- Azure File Share not mounted
+**Docker build fails** — Make sure Docker Desktop is running before running the script.
 
-**GWS token lost after deploy:** The token is backed up to `/data/gws_tokens.json` on the Azure File Share. If the volume isn't mounted, run `.\Setup-Storage.ps1` again. After mounting, reconnect GWS once through the UI.
+**Azure login fails** — Run `az login` manually first, then re-run `.\deploy.ps1`.
 
-**Old revision still running:** `Build-And-Deploy.ps1` deactivates old revisions automatically. If you see two active revisions manually deactivate the old one:
-```powershell
-az containerapp revision list --name mailguard-app --resource-group mailguard-rg -o table
-az containerapp revision deactivate --name mailguard-app --resource-group mailguard-rg --revision <revision-name>
-```
+**App starts but M365 scan fails** — Exchange permissions can take up to 15 minutes to propagate after the App Registration is created. Wait and try again.
+
+**GWS token lost after update** — This shouldn't happen — the token is backed up to Azure File Share. If it does happen, reconnect GWS once from the dashboard. It will persist from that point forward.
+
+**Health check fails** — The app may still be warming up. Wait 60 seconds and visit the URL manually.

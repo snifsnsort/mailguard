@@ -1,5 +1,5 @@
 import { Routes, Route, useNavigate } from 'react-router-dom'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import Sidebar from './components/Sidebar'
 import Dashboard from './pages/Dashboard'
 import Checks from './pages/Checks'
@@ -11,14 +11,14 @@ import LoginPage from './pages/LoginPage'
 import { api } from './utils/api'
 
 export default function App() {
-  const [tenants, setTenants]           = useState([])
+  const [tenants, setTenants] = useState([])
   const [activeTenant, setActiveTenant] = useState(null)
-  const [lastScan, setLastScan]         = useState(null)
-  const [scanning, setScanning]         = useState(false)
-  const [showConnect, setShowConnect]   = useState(false)
-  const [authToken, setAuthToken]       = useState(() => localStorage.getItem('mg_token'))
+  const [lastScan, setLastScan] = useState(null)
+  const [scanning, setScanning] = useState(false)
+  const [showConnect, setShowConnect] = useState(false)
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('mg_token'))
   const [mustChangePassword, setMustChangePassword] = useState(false)
-  const [loadingScan, setLoadingScan]   = useState(false)
+  const [loadingScan, setLoadingScan] = useState(false)
   const navigate = useNavigate()
 
   // Load tenants on auth
@@ -27,7 +27,7 @@ export default function App() {
     api.listTenants().then(ts => {
       setTenants(ts)
       if (ts.length > 0) setActiveTenant(ts[0])
-    }).catch(() => {})  // stay logged in even if tenants fail to load
+    }).catch(() => {})
   }, [authToken])
 
   // Reload last scan whenever active tenant changes
@@ -39,7 +39,6 @@ export default function App() {
       .then(async history => {
         const completed = (history || []).filter(s => s.status === 'completed')
         if (completed.length > 0) {
-          // history is sorted newest-first; fetch full result for latest
           const full = await api.scanResult(completed[0].id)
           setLastScan(full)
         }
@@ -89,14 +88,17 @@ export default function App() {
           setScanning(false)
         }
       }, 2000)
-    } catch (e) { setScanning(false) }
+    } catch (e) {
+      setScanning(false)
+    }
   }
 
   // /connect routes render fullscreen with no sidebar
   const path = window.location.pathname
-  if (path === '/connect' || path === '/onboard' || path === '/start') return <Connect />
+  if (path === '/connect' || path === '/onboard' || path === '/start')
+    return <Connect />
 
-  // Not logged in â show login page
+  // Not logged in — show login page
   if (!authToken) {
     return <LoginPage onLogin={handleLogin} />
   }
@@ -115,29 +117,25 @@ export default function App() {
       />
       <main style={{marginLeft:220,flex:1,minHeight:'100vh'}}>
         <Routes>
-          <Route path="/"        element={<Dashboard tenant={activeTenant} scan={lastScan} scanning={scanning || loadingScan} onScan={handleScan} onAddTenant={() => setShowConnect(true)} token={authToken} />} />
-          <Route path="/checks"  element={<Checks scan={lastScan} token={authToken} />} />
+          <Route path="/" element={
+            <Dashboard
+              tenant={activeTenant}
+              scan={lastScan}
+              scanning={scanning || loadingScan}
+              onScan={handleScan}
+              onAddTenant={() => setShowConnect(true)}
+              token={authToken}
+            />
+          } />
+          <Route path="/checks"         element={<Checks scan={lastScan} token={authToken} />} />
           <Route path="/history"        element={<History tenant={activeTenant} token={authToken} />} />
           <Route path="/lookalike-scan" element={<LookalikeScan token={authToken} />} />
           <Route path="/connect"        element={<Connect />} />
-          <Route path="/onboard" element={<Connect />} />
-          <Route path="/start"   element={<Connect />} />
+          <Route path="/onboard"        element={<Connect />} />
+          <Route path="/start"          element={<Connect />} />
         </Routes>
       </main>
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} onAdded={handleTenantAdded} />}
-      {notification && (
-        <div style={{
-          position: 'fixed', top: 20, right: 20, zIndex: 9999,
-          background: notification.type === 'error' ? '#7f1d1d' : '#14532d',
-          border: `1px solid ${notification.type === 'error' ? '#ef4444' : '#22c55e'}`,
-          color: '#fff', padding: '12px 20px', borderRadius: 10,
-          maxWidth: 420, fontSize: 14, lineHeight: 1.5,
-          display: 'flex', alignItems: 'flex-start', gap: 10
-        }}>
-          <span style={{ flex: 1 }}>{notification.msg}</span>
-          <button onClick={() => setNotification(null)} style={{ background: 'transparent', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 16, padding: 0, lineHeight: 1 }}>×</button>
-        </div>
-      )}
     </div>
   )
 }

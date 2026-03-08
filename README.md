@@ -69,13 +69,66 @@ mailguard/
 
 ---
 
+
 ## Quick Start
 
 ### Prerequisites
 - [Docker Desktop](https://docker.com)
 - [Azure CLI](https://aka.ms/installazurecliwindows)
 - [PowerShell 7+](https://aka.ms/powershell)
+- An Azure subscription (only required for cloud deployment)
+
+### Automated Local Setup (One Command)
+
+Run the automated setup script to create an Azure AD app, configure the required Microsoft Graph permissions, generate a complete `.env` file, and optionally start Docker Compose — all with a single command:
+
+```powershell
+git clone https://github.com/snifsnsort/mailguard.git
+cd mailguard
+.\DeployLocal.ps1
+
+### Prerequisites
+- [Docker Desktop](https://docker.com)
+- [Azure CLI](https://aka.ms/installazurecliwindows)
+- [PowerShell 7+](https://aka.ms/powershell)
 - An Azure subscription
+
+### Run Locally (Docker Compose)
+
+
+```
+### Prerequisites
+- [Docker Desktop](https://docker.com)
+- [Azure CLI](https://aka.ms/installazurecliwindows)
+- [PowerShell 7+](https://aka.ms/powershell)
+- An Azure subscription (only required for cloud deployment)
+
+### Automated Local Setup (One Command)
+
+Run the automated setup script to create an Azure AD app, configure the required Microsoft Graph permissions, generate a complete `.env` file, and optionally start Docker Compose — all with a single command:
+
+```powershell
+git clone https://github.com/snifsnsort/mailguard.git
+cd mailguard
+.\DeployLocal.ps1
+```
+The script will:
+
+Check and install prerequisites (PowerShell, winget, Azure CLI)
+
+Log you into Azure (Global Admin required for your M365 tenant)
+
+Create an app registration named MailGuardLocal-DD-MM-YYYY-HH-MM
+
+Add the exact set of application permissions that enable scanning
+
+Grant admin consent automatically
+
+Generate a client secret and write a complete .env file (including SEED_TENANT_NAME)
+
+Offer to start Docker Compose and open the dashboard for you
+
+After the script finishes, your tenant will be pre‑configured and visible in the MailGuard dashboard – no manual connection needed.
 
 ### Deploy to Azure (one command)
 
@@ -87,13 +140,6 @@ cd mailguard
 
 The script handles everything — Azure resources, Docker build, persistent storage, M365 setup, and opens your browser when done. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full details.
 
-### Run Locally (Docker Compose)
-
-```bash
-cp backend/.env.example backend/.env
-# Edit backend/.env with your credentials
-docker compose up --build
-```
 
 Open [http://localhost:8000](http://localhost:8000) and log in with `admin` / the password you set.
 

@@ -62,6 +62,7 @@ mailguard/
 │       └── utils/api.js      # API client
 ├── Dockerfile                # Multi-stage build (Node → Python)
 ├── docker-compose.yml        # Local development
+├── Deploy-MailGuard-Local-M365.ps1   # One-command local M365 setup
 ├── deploy.ps1                # One-command Azure deployment (first time)
 ├── update.ps1                # Redeploy after code changes
 └── terraform/                # Infrastructure as code (Azure)
@@ -69,85 +70,108 @@ mailguard/
 
 ---
 
-
-## Quick Start
+## Quick Start — Local Deployment (Microsoft 365)
 
 ### Prerequisites
-- [Docker Desktop](https://docker.com)
-- [Azure CLI](https://aka.ms/installazurecliwindows)
-- [PowerShell 7+](https://aka.ms/powershell)
-- An Azure subscription (only required for cloud deployment)
 
-### Automated Local Setup (One Command)
+| Requirement | Notes |
+|---|---|
+| Windows 10/11 | Script is PowerShell-based |
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Must be running before setup starts |
+| Azure CLI | Installed automatically via winget if not found |
+| M365 Global Admin account | Required to grant admin consent during setup |
 
-Run the automated setup script to create an Azure AD app, configure the required Microsoft Graph permissions, generate a complete `.env` file, and optionally start Docker Compose — all with a single command:
+### One-Command Setup
 
 ```powershell
 git clone https://github.com/snifsnsort/mailguard.git
 cd mailguard
-.\DeployLocal.ps1
-
-### Prerequisites
-- [Docker Desktop](https://docker.com)
-- [Azure CLI](https://aka.ms/installazurecliwindows)
-- [PowerShell 7+](https://aka.ms/powershell)
-- An Azure subscription
-
-### Run Locally (Docker Compose)
-
-
+.\Deploy-MailGuard-Local-M365.ps1
 ```
-### Prerequisites
-- [Docker Desktop](https://docker.com)
-- [Azure CLI](https://aka.ms/installazurecliwindows)
-- [PowerShell 7+](https://aka.ms/powershell)
-- An Azure subscription (only required for cloud deployment)
 
-### Automated Local Setup (One Command)
-
-Run the automated setup script to create an Azure AD app, configure the required Microsoft Graph permissions, generate a complete `.env` file, and optionally start Docker Compose — all with a single command:
-
-```powershell
-git clone https://github.com/snifsnsort/mailguard.git
-cd mailguard
-.\DeployLocal.ps1
-```
 The script will:
 
-Check and install prerequisites (PowerShell, winget, Azure CLI)
+1. Check and install prerequisites (Azure CLI via winget if missing)
+2. Prompt for your M365 tenant domain, a friendly name, and a dashboard admin password
+3. Log you into Azure CLI
+4. Create an Entra app registration with read-only Microsoft Graph and Exchange Online permissions
+5. Open your browser for admin consent — sign in as Global Admin and click **Accept**
+6. Generate a client secret and verify it with two live token tests before writing any files
+7. Write `backend\.env` with all credentials
+8. Stop any running containers, wipe the old data volume, and start fresh
 
-Log you into Azure (Global Admin required for your M365 tenant)
+Once complete, MailGuard opens at **http://localhost:8000**. Log in with username `admin` and the password you set.
 
-Create an app registration named MailGuardLocal-DD-MM-YYYY-HH-MM
+> **Note:** `backend\.env` is required every time the container starts. Do not delete it. Do not commit it to git — it is already in `.gitignore`.
 
-Add the exact set of application permissions that enable scanning
+### Adding Google Workspace
 
-Grant admin consent automatically
+After the M365 setup completes, add your GWS OAuth credentials to `backend\.env` before starting the container:
 
-Generate a client secret and write a complete .env file (including SEED_TENANT_NAME)
-
-Offer to start Docker Compose and open the dashboard for you
-
-After the script finishes, your tenant will be pre‑configured and visible in the MailGuard dashboard – no manual connection needed.
-
-### Deploy to Azure (one command)
-
-```powershell
-git clone https://github.com/snifsnsort/mailguard.git
-cd mailguard
-.\deploy.ps1
+```ini
+GWS_CLIENT_ID=<your Google OAuth client ID>
+GWS_CLIENT_SECRET=<your Google OAuth client secret>
+GWS_REDIRECT_URI=http://localhost:8000/api/v1/google/callback
 ```
 
-The script handles everything — Azure resources, Docker build, persistent storage, M365 setup, and opens your browser when done. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for full details.
+Then start the container:
 
-
-Open [http://localhost:8000](http://localhost:8000) and log in with `admin` / the password you set.
+```powershell
+docker compose up --build -d
+```
 
 ---
 
-## Azure Deployment
+## Starting and Stopping
 
-See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full guide.
+```powershell
+# Start
+docker compose up -d
+
+# Stop
+docker compose down
+
+# View logs
+docker compose logs app
+
+# Rebuild after a code change
+docker compose up --build -d
+```
+
+---
+
+## Wipe Everything and Start Clean
+
+Use this if you need a completely fresh deployment — new credentials, clean database, no cached images or volumes.
+
+```powershell
+cd <mailguard folder>
+
+# Stop containers
+docker compose down
+
+# Remove the data volume (SQLite database)
+docker volume ls --format "{{.Name}}" | Where-Object { $_ -match "mailguard" } | ForEach-Object { docker volume rm $_ }
+
+# Remove the built image
+docker images --format "{{.Repository}}:{{.Tag}}" | Where-Object { $_ -match "mailguard" } | ForEach-Object { docker rmi $_ -f }
+
+# Clear the Docker build cache
+docker builder prune -f
+
+# Delete all project files and re-clone
+cd ..
+Remove-Item -Recurse -Force mailguard
+git clone https://github.com/snifsnsort/mailguard.git
+cd mailguard
+
+# Run setup from scratch
+.\Deploy-MailGuard-Local-M365.ps1
+```
+
+---
+
+## Deploy to Azure
 
 ```powershell
 # First time — creates all Azure resources and deploys the app
@@ -160,6 +184,8 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full guide.
 .\deploy.ps1 -Destroy
 ```
 
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the full guide.
+
 ---
 
 ## Environment Variables
@@ -168,12 +194,16 @@ See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the full guide.
 |---|---|---|
 | `SECRET_KEY` | ✅ | JWT signing key — set to a long random string |
 | `ADMIN_PASSWORD` | ✅ | Dashboard login password |
+| `SEED_TENANT_NAME` | ✅ | Friendly name for the auto-registered tenant |
 | `SEED_TENANT_DOMAIN` | ✅ | Primary M365 tenant domain (e.g. `contoso.com`) |
 | `SEED_TENANT_ID` | ✅ | Azure AD tenant ID (GUID) |
 | `SEED_CLIENT_ID` | ✅ | Azure App Registration client ID |
 | `SEED_CLIENT_SECRET` | ✅ | Azure App Registration client secret |
+| `GWS_CLIENT_ID` | ❌ | Google OAuth client ID (required for GWS integration) |
+| `GWS_CLIENT_SECRET` | ❌ | Google OAuth client secret (required for GWS integration) |
+| `GWS_REDIRECT_URI` | ❌ | Google OAuth redirect URI |
 | `ENCRYPTION_KEY` | ❌ | GWS token encryption key — auto-derived from `SECRET_KEY` if not set |
-| `DATABASE_URL` | ❌ | SQLite path — defaults to `/tmp/mailguard.db` |
+| `DATABASE_URL` | ❌ | SQLite path — defaults to `/data/mailguard.db` |
 | `ALLOWED_ORIGINS` | ❌ | CORS origins — defaults to `*` in dev |
 | `MULTI_TENANT_MODE` | ❌ | Set to `true` to allow multiple M365 tenants |
 
@@ -221,6 +251,7 @@ See [LICENSE](LICENSE) for full terms.
 
 - [ ] Password reset UI
 - [ ] GWS Admin SDK checks (IMAP/POP, Third-Party OAuth, Alert Center)
+- [ ] Local deployment script for Google Workspace
 - [ ] Scan all tenants in one click
 - [ ] Scheduled scans with email alerts
 - [ ] Webhook notifications (Slack, Teams)

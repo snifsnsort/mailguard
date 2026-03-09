@@ -63,6 +63,7 @@ mailguard/
 ├── Dockerfile                # Multi-stage build (Node → Python)
 ├── docker-compose.yml        # Local development
 ├── Deploy-MailGuard-Local-M365.ps1   # One-command local M365 setup
+├── Deploy-MailGuard-Local-GWS.ps1    # One-command local GWS setup
 ├── deploy.ps1                # One-command Azure deployment (first time)
 ├── update.ps1                # Redeploy after code changes
 └── terraform/                # Infrastructure as code (Azure)
@@ -119,6 +120,53 @@ Then start the container:
 ```powershell
 docker compose up --build -d
 ```
+
+---
+
+## Quick Start — Local Deployment (Google Workspace only)
+
+Use this if you are connecting a **Google Workspace** tenant and do not have Microsoft 365.
+
+### Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Windows 10/11 | Script is PowerShell-based |
+| [Docker Desktop](https://www.docker.com/products/docker-desktop/) | Must be running before setup starts |
+| Google Workspace Super Admin account | Required to complete the OAuth consent screen |
+| Google Cloud project | Free — script walks you through creating one |
+
+### One-Command Setup
+
+```powershell
+git clone https://github.com/snifsnsort/mailguard.git
+cd mailguard
+.\Deploy-MailGuard-Local-GWS.ps1
+```
+
+The script will:
+
+1. Verify Docker is running
+2. Walk you through creating a Google OAuth Client ID in the Cloud Console (opens your browser with step-by-step instructions)
+3. Prompt for your Client ID, Client Secret, organisation name, and a dashboard password
+4. Write `backend\.env` with all credentials
+5. Build and start the Docker container
+
+Once complete, open **http://localhost:8000** and log in with username `admin` and the password you set. Then click **Connect Google Workspace** and sign in with a Super Admin account.
+
+After authenticating, click **Sync Domains** on the dashboard to discover all verified domains in your Workspace organisation — MailGuard will scan each one automatically.
+
+> **Note:** `backend\.env` is required every time the container starts. Do not delete it. Do not commit it to git — it is already in `.gitignore`.
+
+### Required OAuth scopes (Admin SDK)
+
+| Scope | Purpose |
+|---|---|
+| `admin.reports.audit.readonly` | Alert Center and audit log checks |
+| `admin.directory.user.readonly` | 2SV, MFA, and user policy checks |
+| `admin.directory.domain.readonly` | Sync verified domains |
+| `admin.directory.orgunit.readonly` | Org unit policy checks |
+| `openid`, `email`, `profile` | Identify the authenticating admin |
 
 ---
 
@@ -251,7 +299,8 @@ See [LICENSE](LICENSE) for full terms.
 
 - [ ] Password reset UI
 - [ ] GWS Admin SDK checks (IMAP/POP, Third-Party OAuth, Alert Center)
-- [ ] Local deployment script for Google Workspace
+- [x] Local deployment script for Google Workspace (`Deploy-MailGuard-Local-GWS.ps1`)
+- [x] Sync Domains for Google Workspace (discovers all verified GWS domains via Admin SDK)
 - [ ] Scan all tenants in one click
 - [ ] Scheduled scans with email alerts
 - [ ] Webhook notifications (Slack, Teams)

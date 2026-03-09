@@ -71,33 +71,70 @@ async def sync_domains(
     user_id: Optional[str] = Depends(get_current_user)
 ):
     """
-    Auto-discover all verified domains from the Microsoft 365 tenant via Graph API
-    and store them as extra_domains on the tenant record.
-    Filters out *.onmicrosoft.com domains (internal routing only).
+    Auto-discover all verified domains and store them as extra_domains.
+    - Microsoft 365 tenants: fetched from Graph API (filters out *.onmicrosoft.com)
+    - Google Workspace tenants: fetched from Admin SDK Directory API
+    - Dual-platform tenants: M365 Graph API is used (authoritative for domain list)
     """
     from app.core.security import decrypt
     t = _tenant_query(db, user_id).filter(Tenant.id == tenant_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Tenant not found.")
 
-    client = GraphClient(t.tenant_id, t.client_id, decrypt(t.client_secret))
-    try:
-        raw_domains = await client.get_domains()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Graph API domain fetch failed: {e}")
+    discovered: list[str] = []
 
-    discovered = []
-    for d in raw_domains:
-        name = d.get("id", "").lower().strip()
-        if not name:
-            continue
-        # Skip onmicrosoft.com routing-only domains
-        if name.endswith(".onmicrosoft.com"):
-            continue
-        # Only include verified domains
-        if not d.get("isVerified", False):
-            continue
-        discovered.append(name)
+    # ── GWS-only path ──────────────────────────────────────────────────────────
+    if t.has_gws and not t.has_m365:
+        if not t.gws_refresh_token:
+            raise HTTPException(status_code=400, detail="GWS not connected — no refresh token stored.")
+
+        from app.api.google_auth import get_gws_access_token
+        access_token = await get_gws_access_token(t)
+        if not access_token:
+            raise HTTPException(status_code=502, detail="Could not refresh GWS access token. Re-authenticate via Connect Google.")
+
+        import httpx
+        url = "https://admin.googleapis.com/admin/directory/v1/customer/my_customer/domains"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(url, headers=headers)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Admin SDK domain list failed: {resp.status_code} {resp.text[:200]}")
+            data = resp.json()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Admin SDK domain list failed: {e}")
+
+        for d in data.get("domains", []):
+            name = d.get("domainName", "").lower().strip()
+            if not name:
+                continue
+            # Only include verified domains
+            if not d.get("verified", False):
+                continue
+            discovered.append(name)
+
+    # ── M365 path (also covers dual-platform) ─────────────────────────────────
+    else:
+        if not t.client_secret:
+            raise HTTPException(status_code=400, detail="M365 credentials not configured on this tenant.")
+        client = GraphClient(t.tenant_id, t.client_id, decrypt(t.client_secret))
+        try:
+            raw_domains = await client.get_domains()
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Graph API domain fetch failed: {e}")
+
+        for d in raw_domains:
+            name = d.get("id", "").lower().strip()
+            if not name:
+                continue
+            if name.endswith(".onmicrosoft.com"):
+                continue
+            if not d.get("isVerified", False):
+                continue
+            discovered.append(name)
 
     # Primary domain stays in t.domain; extras = everything else
     extras = [d for d in discovered if d != t.domain.lower()]

@@ -150,7 +150,7 @@ export default function Dashboard({ tenant, scan, scanning, onScan, onAddTenant,
                 + Google Workspace
               </button>
             )}
-            {tenant && tenant.has_m365 && !isGws && <button onClick={syncDomains} disabled={syncing} title="Auto-discover all verified domains from Microsoft 365" style={{display:'flex',alignItems:'center',gap:6,padding:'8px 14px',borderRadius:6,fontSize:12,cursor:syncing?'wait':'pointer',background:'transparent',color:'var(--muted)',border:'1px solid var(--border)',fontFamily:'var(--font-body)',opacity:syncing?.7:1}}>
+            {tenant && (tenant.has_m365 || tenant.has_gws) && <button onClick={syncDomains} disabled={syncing} title={isGws ? 'Auto-discover all verified domains from Google Workspace Admin SDK' : 'Auto-discover all verified domains from Microsoft 365'} style={{display:'flex',alignItems:'center',gap:6,padding:'8px 14px',borderRadius:6,fontSize:12,cursor:syncing?'wait':'pointer',background:'transparent',color:'var(--muted)',border:'1px solid var(--border)',fontFamily:'var(--font-body)',opacity:syncing?.7:1}}>
               <Globe size={12} style={{animation:syncing?'spin 1s linear infinite':''}}/> {syncing ? 'Syncing...' : 'Sync Domains'}
             </button>}
             <button onClick={startScan} disabled={scanning} style={{display:'flex',alignItems:'center',gap:6,padding:'8px 18px',borderRadius:6,fontSize:13,fontWeight:700,cursor:scanning?'wait':'pointer',background:'var(--accent)',color:'#000',border:'none',fontFamily:'var(--font-body)',opacity:scanning?.7:1}}>

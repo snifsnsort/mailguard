@@ -6,6 +6,11 @@ import Checks from './pages/Checks'
 import History from './pages/History'
 import Connect from './pages/Connect'
 import LookalikeScan from './pages/LookalikeScan'
+
+// ── V2 pages ──────────────────────────────────────────────────────────────────
+import PublicIntelPage from './v2/pages/public_intel/PublicIntelPage'
+import MXAnalysisPage from './v2/pages/exposure/MXAnalysisPage'
+import AuthHealthPage from './v2/pages/auth_health/AuthHealthPage'
 import ConnectModal from './components/ConnectModal'
 import LoginPage from './pages/LoginPage'
 import { api } from './utils/api'
@@ -133,6 +138,11 @@ export default function App() {
           <Route path="/connect"        element={<Connect />} />
           <Route path="/onboard"        element={<Connect />} />
           <Route path="/start"          element={<Connect />} />
+
+          {/* V2 routes */}
+          <Route path="/v2/public-intel" element={<PublicIntelPage />} />
+          <Route path="/v2/exposure/mx"  element={<MXAnalysisPage />} />
+          <Route path="/v2/auth-health"  element={<AuthHealthPage />} />
         </Routes>
       </main>
       {showConnect && <ConnectModal onClose={() => setShowConnect(false)} onAdded={handleTenantAdded} />}

@@ -1,0 +1,1 @@
+# Exposure — Google Workspace (stub)

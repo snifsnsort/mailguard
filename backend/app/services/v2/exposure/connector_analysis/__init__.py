@@ -1,0 +1,1 @@
+# Placeholder - connector analysis

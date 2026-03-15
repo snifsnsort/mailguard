@@ -1,0 +1,77 @@
+/* =========================================================
+   MailGuard V2 — CSS Design Token System
+   Source of truth for all visual properties.
+   Import at app level: import "./styles/tokens.css"
+   Values are mirrored from theme.ts; this file enables
+   CSS-class-based styling across the application.
+   ========================================================= */
+
+:root {
+  /* ── Backgrounds ── */
+  --bg-primary:   #080d16;
+  --bg-surface:   #0f1724;
+  --bg-card:      #0f1724;
+  --bg-elevated:  #162032;
+  --bg-inset:     #0a1020;
+
+  /* ── Borders ── */
+  --border-faint:  #1a2840;
+  --border-subtle: #1e3152;
+  --border-active: #2a4a7f;
+
+  /* ── Accents ── */
+  --accent-cyan:   #00d4ff;
+  --accent-amber:  #f59e0b;
+  --accent-green:  #00e57a;
+  --accent-red:    #ff3d5a;
+
+  /* ── Status ── */
+  --status-critical:     #ff3d5a;
+  --status-critical-dim: #3d0d14;
+  --status-warning:      #f59e0b;
+  --status-warning-dim:  #3d2800;
+  --status-success:      #00e57a;
+  --status-success-dim:  #0a3d24;
+  --status-info:         #64748b;
+  --status-info-dim:     #111827;
+
+  /* ── Severity text ── */
+  --sev-critical: #ff3d5a;
+  --sev-high:     #ff6b2b;
+  --sev-medium:   #f59e0b;
+  --sev-low:      #00d4ff;
+  --sev-info:     #64748b;
+
+  /* ── Severity backgrounds ── */
+  --sev-bg-critical: #3d0d14;
+  --sev-bg-high:     #3d1a00;
+  --sev-bg-medium:   #3d2800;
+  --sev-bg-low:      #0e2a3d;
+  --sev-bg-info:     #111827;
+
+  /* ── Text ── */
+  --text-primary:   #e2e8f0;
+  --text-secondary: #64748b;
+  --text-muted:     #3d5068;
+  --text-code:      #94a3b8;
+
+  /* ── Typography ── */
+  --font-ui:   'DM Sans', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+
+  /* ── Spacing ── */
+  --card-pad:    12px 16px;
+  --section-gap: 16px;
+  --row-h:       34px;
+
+  /* ── Radius ── */
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+
+  /* ── Topology ── */
+  --topo-max-h:    130px;
+  --topo-node-h:   38px;
+  --topo-node-w:   130px;
+  --topo-line-w:   1.5px;
+}

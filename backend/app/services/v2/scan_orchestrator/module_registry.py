@@ -1,24 +1,46 @@
 # module_registry.py
 #
-# Scan modules register themselves here.
-# Key: (family, platform) tuple
-# Value: module class with an async run(request) -> ScanResult method
-from app.services.v2.public_intel.microsoft365 import M365TenantDiscovery
-from app.services.v2.exposure.mx_analysis import MXAnalyzer
+# TRANSITIONAL — direct-execution compatibility only.
+# This registry serves the legacy run_scan() path used by the direct V2 family
+# GET endpoints. It is NOT the authoritative registry for orchestrated jobs.
+# The orchestration-facing registry is task_registry.py.
+#
+# When the direct-execution GET endpoints are retired, this file will be deleted.
+#
+# M365TenantDiscovery and MXAnalyzer are imported lazily to avoid crashing the
+# app at startup when those modules have not yet been committed to the repo.
+
 from app.services.v2.authentication import AuthHealthAnalyzer
 
-REGISTERED_MODULES: dict = {
-    ("public_intel",    "microsoft365"): M365TenantDiscovery,
-    ("exposure",        "microsoft365"): MXAnalyzer,
-    # Authentication health is DNS-based and platform-agnostic
-    ("authentication",  "global"):       AuthHealthAnalyzer,
-    ("authentication",  "microsoft365"): AuthHealthAnalyzer,
-    ("authentication",  "google_workspace"): AuthHealthAnalyzer,
-    # Stubs — register as modules are implemented
-    # ("public_intel", "google_workspace"): GWSTenantDiscovery,
-    # ("posture",       "microsoft365"):    M365PostureScanner,
-    # ("lookalike",     "global"):          LookalikeScanner,
-}
+
+def _lazy_import(module_path: str, class_name: str):
+    """Import a class lazily; return None if the module is not yet available."""
+    try:
+        import importlib
+        mod = importlib.import_module(module_path)
+        return getattr(mod, class_name)
+    except (ModuleNotFoundError, AttributeError):
+        return None
+
+
+_MXAnalyzer          = _lazy_import("app.services.v2.exposure.mx_analysis", "MXAnalyzer")
+_M365TenantDiscovery = _lazy_import("app.services.v2.public_intel.microsoft365", "M365TenantDiscovery")
+
+REGISTERED_MODULES: dict = {}
+
+if _M365TenantDiscovery:
+    REGISTERED_MODULES[("public_intel", "microsoft365")] = _M365TenantDiscovery
+
+if _MXAnalyzer:
+    REGISTERED_MODULES[("exposure", "microsoft365")] = _MXAnalyzer
+
+# Authentication health is DNS-based and platform-agnostic
+REGISTERED_MODULES.update({
+    ("authentication", "global"):            AuthHealthAnalyzer,
+    ("authentication", "microsoft365"):      AuthHealthAnalyzer,
+    ("authentication", "google_workspace"):  AuthHealthAnalyzer,
+})
+
 
 def get_module(family: str, platform: str):
     """

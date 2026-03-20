@@ -1,7 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import { Crosshair, RefreshCw, AlertTriangle, Shield, ChevronDown, ChevronUp, Globe, Clock, Server, Download, FileText } from 'lucide-react'
+import { ACTION_LABELS, EXPOSURE_LABELS } from '../utils/uiLabels'
 
 const API = '/api/v1/aggressive-scan'
+
+const EXPOSURE_LEVEL_LABELS = {
+  critical: 'External Exposure',
+  high: 'Strong Signals',
+  medium: 'Moderate Signals',
+  low: 'Low Signals',
+}
 
 const RISK_COLORS = {
   critical: { bg: 'rgba(239,68,68,0.12)',  border: '#ef4444', text: '#ef4444'  },
@@ -32,7 +40,7 @@ function RiskBadge({ level }) {
       padding: '2px 8px', borderRadius: 4,
       background: c.bg, border: `1px solid ${c.border}`, color: c.text,
     }}>
-      {level}
+      {EXPOSURE_LEVEL_LABELS[level] || EXPOSURE_LEVEL_LABELS.low}
     </span>
   )
 }
@@ -172,6 +180,24 @@ export default function LookalikeScan({ token }) {
 
   const headers = { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }
 
+  // Load most recent cached scan on mount
+  useEffect(() => {
+    const loadLatest = async () => {
+      try {
+        const r = await fetch(`${API}/latest`, { headers })
+        if (!r.ok) return
+        const data = await r.json()
+        if (data.status === 'completed' && data.results) {
+          setResults(data.results)
+          setDomains(data.domains || [])
+          setStatus('completed')
+          setScanId(data.id)
+        }
+      } catch (_) {}
+    }
+    loadLatest()
+  }, [])
+
   const stopPolling = () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null } }
 
   const pollStatus = async (id) => {
@@ -279,7 +305,7 @@ export default function LookalikeScan({ token }) {
 
   const exportCSV = () => {
     const hdrs = [
-      'Candidate','Base Domain','Risk Level','Enriched Score','Similarity Score',
+      'Candidate','Base Domain','External Exposure','Exposure Score','Similarity Score',
       'Mutation Type','Registered','Has MX','Has A','Takeover Risk',
       'Domain Age (days)','Registrar','Registered Date','CT Certs','Reasons'
     ]
@@ -317,17 +343,17 @@ export default function LookalikeScan({ token }) {
       <td style="padding:6px 8px;font-size:11px;max-width:200px">${(r.reasons||[]).slice(0,2).join('; ')}</td>
     </tr>`).join('')
     win.document.write(`<!DOCTYPE html><html><head>
-      <title>MailGuard Lookalike Scan</title>
+      <title>MailGuard Lookalike Domains Scan</title>
       <style>body{font-family:-apple-system,sans-serif;margin:32px;color:#111}
       h1{font-size:20px;margin-bottom:4px}.meta{font-size:12px;color:#6b7280;margin-bottom:24px}
       table{width:100%;border-collapse:collapse;font-size:12px}
       th{background:#f3f4f6;padding:8px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;border-bottom:2px solid #e5e7eb}
       @media print{@page{margin:16mm}}</style>
     </head><body>
-      <h1>MailGuard — Lookalike Scanner (Aggressive)</h1>
+      <h1>MailGuard — Lookalike Domains (Aggressive)</h1>
       <div class="meta">Domains: ${(domains||[]).join(', ')} · ${(results||[]).length} candidates · ${new Date().toLocaleString()}</div>
       <table><thead><tr>
-        <th>Candidate</th><th>Base</th><th>Risk</th><th>Score</th>
+        <th>Candidate</th><th>Base</th><th>External Exposure</th><th>Exposure Score</th>
         <th>Mutation</th><th>Status</th><th>DNS</th><th>Age</th><th>Reasons</th>
       </tr></thead><tbody>${trs}</tbody></table>
     </body></html>`)
@@ -343,13 +369,13 @@ export default function LookalikeScan({ token }) {
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
             <Crosshair size={20} color="var(--accent)" />
-            <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Lookalike Scanner</h1>
+            <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Lookalike Domains</h1>
             <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: 'rgba(239,68,68,0.12)', color: '#ef4444', fontWeight: 700, letterSpacing: 1, textTransform: 'uppercase', border: '1px solid rgba(239,68,68,0.3)' }}>
               Aggressive
             </span>
           </div>
           <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0 }}>
-            Deep typosquatting scan across all connected tenant domains — includes DNS, WHOIS, CT and takeover detection.
+            Deep lookalike domain analysis across all connected tenant domains — includes DNS, WHOIS, CT and takeover detection.
           </p>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -360,14 +386,14 @@ export default function LookalikeScan({ token }) {
                 borderRadius:8,border:'1px solid var(--border)',background:'transparent',
                 color:'var(--text)',cursor:'pointer',fontSize:12,fontFamily:'var(--font-body)',transition:'all .15s'
               }}>
-                <Download size={13} /> CSV
+                <Download size={13} /> {`${ACTION_LABELS.exportReport} (CSV)`}
               </button>
               <button onClick={exportPDF} style={{
                 display:'flex',alignItems:'center',gap:6,padding:'8px 14px',
                 borderRadius:8,border:'1px solid var(--border)',background:'transparent',
                 color:'var(--text)',cursor:'pointer',fontSize:12,fontFamily:'var(--font-body)',transition:'all .15s'
               }}>
-                <FileText size={13} /> PDF
+                <FileText size={13} /> {ACTION_LABELS.exportReport}
               </button>
             </>
           )}
@@ -386,7 +412,7 @@ export default function LookalikeScan({ token }) {
         >
           {loading
             ? <><RefreshCw size={14} style={{ animation: 'spin 1s linear infinite' }} /> Scanning…</>
-            : <><Crosshair size={14} /> Run Aggressive Scan</>}
+            : <><Crosshair size={14} /> {ACTION_LABELS.runScan}</>}
         </button>
         </div>
       </div>
@@ -418,10 +444,10 @@ export default function LookalikeScan({ token }) {
           {/* Summary stats */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10, marginBottom: 20 }}>
             {[
-              { label: 'Total',      value: results.length,          color: 'var(--text)',   filter: 'all' },
-              { label: 'Critical',   value: counts.critical  || 0,   color: '#ef4444',       filter: 'critical' },
-              { label: 'High',       value: counts.high      || 0,   color: '#f97316',       filter: 'high' },
-              { label: 'Medium',     value: counts.medium    || 0,   color: '#eab308',       filter: 'medium' },
+              { label: EXPOSURE_LABELS.findings, value: results.length, color: 'var(--text)', filter: 'all' },
+              { label: EXPOSURE_LABELS.external, value: counts.critical || 0, color: '#ef4444', filter: 'critical' },
+              { label: 'Strong Signals', value: counts.high || 0, color: '#f97316', filter: 'high' },
+              { label: 'Moderate Signals', value: counts.medium || 0, color: '#eab308', filter: 'medium' },
               { label: 'Registered', value: counts.registered || 0,  color: 'var(--accent)', filter: 'registered' },
             ].map(({ label, value, color, filter: f }) => (
               <div
@@ -460,7 +486,7 @@ export default function LookalikeScan({ token }) {
             {[
               { label: 'Domain / Base', key: 'candidate' },
               { label: 'Proximity Score', key: 'enriched_score' },
-              { label: 'Risk',          key: 'risk_level' },
+              { label: 'External Exposure', key: 'risk_level' },
               { label: 'Status',        key: 'status' },
               { label: 'Signals',       key: 'signals' },
               { label: '',              key: null },
@@ -490,7 +516,7 @@ export default function LookalikeScan({ token }) {
 
           {/* Scan meta */}
           <div style={{ marginTop: 16, fontSize: 11, color: 'var(--muted)', textAlign: 'right' }}>
-            Scanned {domains.length} domain{domains.length !== 1 ? 's' : ''} · {results.length} candidates scored · Sorted by enriched risk score
+            Scanned {domains.length} domain{domains.length !== 1 ? 's' : ''} · {results.length} candidates scored · Sorted by enriched exposure score
           </div>
         </>
       )}
@@ -500,7 +526,7 @@ export default function LookalikeScan({ token }) {
         <div style={{ textAlign: 'center', padding: '80px 0' }}>
           <Crosshair size={40} color="var(--muted)" style={{ marginBottom: 16, opacity: 0.4 }} />
           <div style={{ fontSize: 14, color: 'var(--muted)', marginBottom: 8 }}>No scan run yet</div>
-          <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>Click "Run Aggressive Scan" to start a deep lookalike analysis across all your tenants.</div>
+          <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>Click "Run Scan" to start a deep lookalike domain analysis across all your tenants.</div>
         </div>
       )}
 

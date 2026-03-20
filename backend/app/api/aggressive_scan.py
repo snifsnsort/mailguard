@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 import traceback
+from pydantic import BaseModel, Field
 
 from app.core.database import get_db, SessionLocal
 from app.core.auth import get_current_user
@@ -10,8 +11,14 @@ from app.core.config import settings
 from app.models.tenant import Tenant
 from app.models.aggressive_scan import AggressiveScan, AggressiveScanStatus
 from app.services.aggressive_lookalike import run_aggressive_scan
+from app.services.reputation import reputation_service
 
 router = APIRouter()
+
+
+class ReputationBatchRequest(BaseModel):
+    root_domain: Optional[str] = None
+    domains: dict[str, list[str]] = Field(default_factory=dict)
 
 
 def _et_now():
@@ -117,3 +124,30 @@ def get_aggressive_result(scan_id: str, db: Session = Depends(get_db)):
         "finished_at": scan.finished_at,
         "error":       scan.error,
     }
+
+
+@router.get("/latest")
+def get_latest_aggressive_scan(db: Session = Depends(get_db)):
+    """Return the most recent completed aggressive scan, or 404 if none exists."""
+    scan = (
+        db.query(AggressiveScan)
+        .filter(AggressiveScan.status == AggressiveScanStatus.completed)
+        .order_by(AggressiveScan.finished_at.desc())
+        .first()
+    )
+    if not scan:
+        raise HTTPException(status_code=404, detail="No completed scan found.")
+    return {
+        "id":          scan.id,
+        "status":      scan.status,
+        "domains":     scan.domains,
+        "results":     scan.results or [],
+        "started_at":  scan.started_at,
+        "finished_at": scan.finished_at,
+        "error":       scan.error,
+    }
+
+
+@router.post("/reputation")
+async def get_reputation_batch(payload: ReputationBatchRequest):
+    return await reputation_service.summarize_many(payload.domains, root_domain=payload.root_domain)

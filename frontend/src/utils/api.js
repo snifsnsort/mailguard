@@ -22,21 +22,20 @@ async function request(path, opts = {}) {
 
 export const api = {
   authHeaders: () => { const t = getToken(); return t ? { Authorization: `Bearer ${t}` } : {} },
-  // Auth
   login:          (username, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   changePassword: (token, newPassword) => request('/auth/change-password', { method: 'POST', body: JSON.stringify({ token, new_password: newPassword }) }),
 
-  // Tenants
   listTenants:  ()     => request('/tenants/'),
   createTenant: (data) => request('/tenants/', { method: 'POST', body: JSON.stringify(data) }),
   deleteTenant: (id)   => request(`/tenants/${id}`, { method: 'DELETE' }),
 
-  // Scans
-  triggerScan: (tenantId) => request(`/scans/${tenantId}/trigger`, { method: 'POST' }),
-  scanStatus:  (scanId)   => request(`/scans/status/${scanId}`),
-  scanResult:  (scanId)   => request(`/scans/result/${scanId}`),
-  scanHistory: (tenantId) => request(`/scans/${tenantId}/history`),
+  triggerScan:      (tenantId) => request(`/scans/${tenantId}/trigger`, { method: 'POST' }),
+  scanStatus:       (scanId)   => request(`/scans/status/${scanId}`),
+  scanResult:       (scanId)   => request(`/scans/result/${scanId}`),
+  scanHistory:      (tenantId) => request(`/scans/${tenantId}/history`),
+  getScanSchedule:    (tenantId) => request(`/scans/${tenantId}/schedule`),
+  saveScanSchedule:   (tenantId, data) => request(`/scans/${tenantId}/schedule`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteScanSchedule: (tenantId) => request(`/scans/${tenantId}/schedule`, { method: 'DELETE' }),
 
-  // Reports
   reportPdfUrl: (scanId) => `${BASE}/reports/${scanId}/pdf`,
 }

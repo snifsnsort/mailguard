@@ -71,6 +71,18 @@ mailguard/
 
 ---
 
+## Safe Checkpoints
+
+For safer iteration, use the checkpoint script after a green build:
+
+```powershell
+.\scripts\Build-And-Checkpoint.ps1
+```
+
+This runs `docker compose build`, commits the current state if the build succeeds, and pushes the checkpoint to `origin`.
+
+---
+
 ## Quick Start — Local Deployment (Microsoft 365)
 
 ### Prerequisites

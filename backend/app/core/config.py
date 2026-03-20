@@ -42,6 +42,14 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/google/callback"
 
+    # Reputation providers
+    ABUSEIPDB_API_KEY: str = ""
+    VT_API_KEY: str = ""
+    URLHAUS_AUTH_KEY: str = ""
+    SPAMHAUS_DBL_LOOKUP_DOMAIN: str = ""
+    SPAMHAUS_USERNAME: str = ""
+    SPAMHAUS_KEY: str = ""
+
     @property
     def multi_tenant_mode(self) -> bool:
         return self.MULTI_TENANT_MODE.lower() in ("true", "1", "yes")

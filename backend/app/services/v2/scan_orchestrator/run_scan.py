@@ -1,20 +1,42 @@
 # run_scan.py
 #
-# Entry point for V2 scan execution.
-# Called by API layer. Delegates to the ScanOrchestrator.
+# TRANSITIONAL — direct-execution entry point used by the legacy V2 family
+# GET endpoints in router.py. This path does NOT go through job creation or
+# task persistence. It exists only to keep the existing direct-scan endpoints
+# functional while pages are migrated to the jobs API.
 #
-# Flow: API endpoint → run_scan() → ScanOrchestrator → scan module → ScanResult
+# When all pages have migrated to the orchestrated jobs API, the direct-scan
+# GET endpoints in router.py will be retired and this file will be deleted.
 
 from app.models.v2.scan_request import ScanRequest
 from app.models.v2.scan_result import ScanResult
-from app.services.v2.scan_orchestrator.orchestrator import ScanOrchestrator
-
-_orchestrator = ScanOrchestrator()
+from app.services.v2.scan_orchestrator.module_registry import get_module
 
 
 async def run_scan(scan_request: ScanRequest) -> ScanResult:
     """
-    Entry point for V2 scan execution.
-    Called by API endpoints.
+    Entry point for direct (non-orchestrated) V2 scan execution.
+
+    Dispatches to the registered module for the first requested family.
+    Returns a ScanResult dataclass. Does not create job or task records.
     """
-    return await _orchestrator.run(scan_request)
+    families = scan_request.families or []
+    if not families:
+        raise NotImplementedError("No scan families specified.")
+
+    family = families[0]
+    module_cls = get_module(family, scan_request.platform)
+
+    if module_cls is None:
+        # Also try global fallback
+        module_cls = get_module(family, "global")
+
+    if module_cls is None:
+        raise NotImplementedError(
+            f"No module registered for family='{family}' "
+            f"platform='{scan_request.platform}'. "
+            "This combination may not be implemented yet."
+        )
+
+    module = module_cls(scan_request.domain)
+    return await module.run(scan_request)

@@ -1,395 +1,298 @@
-// PublicIntelPage.tsx — MailGuard V2
-// Public Tenant Intelligence — dark security terminal aesthetic
+/**
+ * PublicIntelPage.tsx — MailGuard V2
+ *
+ * Displays public tenant intelligence for a domain.
+ * Defaults to the shared activeDomain from ScopeContext.
+ * Supports local override and explicit promotion to global scope.
+ *
+ * API: GET /api/v2/public-intel/{domain}?platform=microsoft365
+ */
 
-import React, { useState, useEffect } from "react";
-import { apiClient } from "../../api/client";
-import { PublicIntelScanResult, PublicIntelSummary } from "../../types/PublicIntelResult";
-import { colors, fonts, radius, injectFonts, cardStyle } from "../../theme";
-import { DomainSelector } from "../../components/DomainSelector";
-import { Tenant, MOCK_TENANTS } from "../../types/Tenant";
+import { useState, useEffect, useRef } from 'react'
+import { useScope } from '../../context/ScopeContext'
 
-type PageState =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "success"; result: PublicIntelScanResult }
-  | { status: "error"; message: string };
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// Severity badge
-// ---------------------------------------------------------------------------
-
-function SeverityBadge({ severity }: { severity: string }) {
-  return (
-    <span style={{
-      display: "inline-flex",
-      alignItems: "center",
-      padding: "2px 8px",
-      borderRadius: radius.sm,
-      fontSize: 10,
-      fontWeight: 600,
-      letterSpacing: "0.08em",
-      fontFamily: fonts.mono,
-      backgroundColor: colors.severityBg[severity as keyof typeof colors.severityBg] ?? colors.bgElevated,
-      color: colors.severityText[severity as keyof typeof colors.severityText] ?? colors.textSecondary,
-      border: `1px solid ${colors.severityText[severity as keyof typeof colors.severityText] ?? colors.borderSubtle}22`,
-    }}>
-      {severity.toUpperCase()}
-    </span>
-  );
+interface Finding {
+  id: string
+  category: string
+  severity: string
+  title: string
+  description: string
+  recommended_action: string
+  evidence: Record<string, unknown>
 }
 
-// ---------------------------------------------------------------------------
-// Summary row component
-// ---------------------------------------------------------------------------
-
-function SummaryRow({
-  label,
-  value,
-  mono = false,
-  highlight = false,
-}: {
-  label: string;
-  value: string | null | boolean;
-  mono?: boolean;
-  highlight?: boolean;
-}) {
-  const displayValue = value === null || value === undefined
-    ? <span style={{ color: colors.textMuted }}>—</span>
-    : typeof value === "boolean"
-    ? (
-      <span style={{
-        color: value ? colors.green : colors.textSecondary,
-        fontFamily: fonts.mono,
-        fontSize: 13,
-      }}>
-        {value ? "● YES" : "○ NO"}
-      </span>
-    )
-    : (
-      <span style={{
-        fontFamily: mono ? fonts.mono : fonts.ui,
-        fontSize: mono ? 12 : 13,
-        color: highlight ? colors.cyan : colors.textPrimary,
-        wordBreak: "break-all",
-      }}>
-        {String(value)}
-      </span>
-    );
-
-  return (
-    <tr>
-      <td style={{
-        padding: "10px 0",
-        color: colors.textSecondary,
-        fontSize: 12,
-        fontWeight: 500,
-        letterSpacing: "0.04em",
-        textTransform: "uppercase",
-        width: 200,
-        verticalAlign: "top",
-        borderBottom: `1px solid ${colors.borderFaint}`,
-      }}>
-        {label}
-      </td>
-      <td style={{
-        padding: "10px 0 10px 16px",
-        verticalAlign: "top",
-        borderBottom: `1px solid ${colors.borderFaint}`,
-      }}>
-        {displayValue}
-      </td>
-    </tr>
-  );
+interface ScanResult {
+  scan_id: string
+  tenant_id: string
+  family: string
+  findings: Finding[]
+  score: number
+  status: string
+  timestamp: string
+  evidence: Record<string, unknown>
 }
 
-// ---------------------------------------------------------------------------
-// Summary card
-// ---------------------------------------------------------------------------
+// ── Style helpers ─────────────────────────────────────────────────────────────
 
-function SummaryCard({ summary }: { summary: PublicIntelSummary }) {
-  return (
-    <div style={cardStyle}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
-        <span style={{
-          width: 3,
-          height: 18,
-          backgroundColor: colors.cyan,
-          borderRadius: 2,
-          display: "inline-block",
-        }} />
-        <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, color: colors.textPrimary, letterSpacing: "0.04em" }}>
-          TENANT INTELLIGENCE SUMMARY
-        </h3>
-        {summary.is_m365_detected && (
-          <span style={{
-            marginLeft: "auto",
-            padding: "2px 10px",
-            borderRadius: 12,
-            fontSize: 11,
-            fontWeight: 600,
-            backgroundColor: colors.greenDim,
-            color: colors.green,
-            border: `1px solid ${colors.green}33`,
-            fontFamily: fonts.mono,
-          }}>
-            M365 DETECTED
-          </span>
-        )}
-      </div>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <tbody>
-          <SummaryRow label="Domain"           value={summary.domain} />
-          <SummaryRow label="Tenant ID"        value={summary.tenant_id}          mono highlight />
-          <SummaryRow label="Namespace Type"   value={summary.namespace_type} />
-          <SummaryRow label="Cloud Instance"   value={summary.cloud_instance_name} mono />
-          <SummaryRow label="Tenant Region"    value={summary.tenant_region_scope} />
-          <SummaryRow label="OIDC Issuer"      value={summary.oidc_issuer}         mono />
-          <SummaryRow label="M365 Detected"    value={summary.is_m365_detected} />
-        </tbody>
-      </table>
-    </div>
-  );
+const SEV: Record<string, { bg: string; border: string; color: string }> = {
+  critical: { bg: 'rgba(239,68,68,0.10)',   border: 'rgba(239,68,68,0.35)',   color: '#ef4444' },
+  high:     { bg: 'rgba(249,115,22,0.10)',  border: 'rgba(249,115,22,0.35)',  color: '#f97316' },
+  medium:   { bg: 'rgba(234,179,8,0.10)',   border: 'rgba(234,179,8,0.35)',   color: '#eab308' },
+  low:      { bg: 'rgba(148,163,184,0.10)', border: 'rgba(148,163,184,0.3)', color: '#94a3b8' },
+  info:     { bg: 'rgba(148,163,184,0.06)', border: 'rgba(148,163,184,0.2)', color: '#64748b' },
 }
 
-// ---------------------------------------------------------------------------
-// Finding row
-// ---------------------------------------------------------------------------
+// ── Sub-components ────────────────────────────────────────────────────────────
 
-function FindingRow({ finding }: { finding: PublicIntelScanResult["findings"][number] }) {
-  const [expanded, setExpanded] = useState(false);
-
+function FindingRow({ f }: { f: Finding }) {
+  const [open, setOpen] = useState(false)
+  const s = SEV[f.severity] ?? SEV.info
   return (
-    <div
-      style={{
-        borderBottom: `1px solid ${colors.borderFaint}`,
-        transition: "background 0.15s",
-      }}
-    >
+    <div style={{ border: `1px solid ${s.border}`, borderRadius: 8, marginBottom: 6, overflow: 'hidden' }}>
       <div
-        onClick={() => setExpanded(!expanded)}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          padding: "12px 4px",
-          cursor: "pointer",
-        }}
-        onMouseEnter={e => (e.currentTarget.style.backgroundColor = colors.bgElevated)}
-        onMouseLeave={e => (e.currentTarget.style.backgroundColor = "transparent")}
+        onClick={() => setOpen(v => !v)}
+        style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 14px', cursor: 'pointer', background: s.bg }}
       >
-        <SeverityBadge severity={finding.severity} />
-        <span style={{ flex: 1, fontSize: 13, color: colors.textPrimary, fontWeight: 500 }}>
-          {finding.title}
+        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: 'uppercase', color: s.color, flexShrink: 0, marginTop: 1, minWidth: 58 }}>
+          {f.severity}
         </span>
-        <span style={{
-          fontSize: 10,
-          color: colors.textMuted,
-          fontFamily: fonts.mono,
-          transform: expanded ? "rotate(180deg)" : "none",
-          transition: "transform 0.2s",
-        }}>
-          ▼
-        </span>
+        <span style={{ fontSize: 12, color: 'var(--text)', flex: 1, lineHeight: 1.5 }}>{f.title}</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>{open ? '▲' : '▼'}</span>
       </div>
-
-      {expanded && (
-        <div style={{ padding: "0 4px 16px 4px" }}>
-          <p style={{
-            margin: "0 0 12px",
-            fontSize: 13,
-            color: colors.textSecondary,
-            lineHeight: 1.6,
-          }}>
-            {finding.description}
-          </p>
-          {Object.keys(finding.evidence).length > 0 && (
-            <pre style={{
-              backgroundColor: colors.bgInset,
-              border: `1px solid ${colors.borderSubtle}`,
-              borderRadius: radius.sm,
-              padding: "12px 14px",
-              fontSize: 11,
-              fontFamily: fonts.mono,
-              color: colors.textCode,
-              overflowX: "auto",
-              margin: 0,
-              lineHeight: 1.6,
-            }}>
-              {JSON.stringify(finding.evidence, null, 2)}
-            </pre>
+      {open && (
+        <div style={{ padding: '12px 14px', background: 'rgba(255,255,255,0.01)', borderTop: `1px solid ${s.border}` }}>
+          <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.65, margin: '0 0 10px' }}>{f.description}</p>
+          {f.recommended_action && (
+            <div style={{ padding: '8px 12px', borderRadius: 6, fontSize: 12, background: 'rgba(0,229,255,0.04)', border: '1px solid rgba(0,229,255,0.12)', color: 'var(--text)', lineHeight: 1.5 }}>
+              <strong style={{ color: 'var(--accent)' }}>Action: </strong>{f.recommended_action}
+            </div>
           )}
         </div>
       )}
     </div>
-  );
+  )
 }
 
-// ---------------------------------------------------------------------------
-// Main page
-// ---------------------------------------------------------------------------
+function Collapsible({ title, icon, children, defaultOpen = false }: {
+  title: string; icon: string; children: React.ReactNode; defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 10, marginBottom: 12, overflow: 'hidden' }}>
+      <button onClick={() => setOpen(v => !v)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 18px', background: 'var(--surface)', border: 'none', cursor: 'pointer', color: 'var(--text)', fontFamily: 'var(--font-body)' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 600 }}>{icon} {title}</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div style={{ padding: '14px 18px', borderTop: '1px solid var(--border)', background: 'rgba(255,255,255,0.01)' }}>
+          {children}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function KV({ label, value, valueColor }: { label: string; value: string | number | boolean; valueColor?: string }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+      <span style={{ color: 'var(--muted)' }}>{label}</span>
+      <span style={{ color: valueColor ?? 'var(--text)', fontFamily: 'var(--font-mono)' }}>{String(value)}</span>
+    </div>
+  )
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function PublicIntelPage() {
-  const [domain, setDomain]               = useState("");
-  const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
-  const [page, setPage]                   = useState<PageState>({ status: "idle" });
+  const { activeDomain, setActiveDomain, selectableDomains, addToSelectableDomains } = useScope()
 
-  useEffect(() => { injectFonts(); }, []);
+  const [domain,   setDomain]   = useState('')
+  const [platform, setPlatform] = useState('microsoft365')
+  const [loading,  setLoading]  = useState(false)
+  const [result,   setResult]   = useState<ScanResult | null>(null)
+  const [error,    setError]    = useState<string | null>(null)
+
+  // Track whether the user has manually typed something different from global scope
+  const userHasOverridden = useRef(false)
+
+  // Follow sidebar scope changes unless user has locally overridden
+  useEffect(() => {
+    if (!userHasOverridden.current) {
+      setDomain(activeDomain)
+    }
+  }, [activeDomain])
+
+  const handleDomainChange = (value: string) => {
+    setDomain(value)
+    userHasOverridden.current = value.trim().toLowerCase() !== activeDomain.toLowerCase()
+  }
+
+  const isOverride = domain.trim().toLowerCase() !== activeDomain.toLowerCase() && domain.trim() !== ''
 
   const handleScan = async () => {
-    const trimmed = domain.trim().toLowerCase();
-    if (!trimmed) return;
-    setPage({ status: "loading" });
+    const d = domain.trim().toLowerCase()
+    if (!d) return
+    setLoading(true)
+    setError(null)
+    setResult(null)
     try {
-      const result = await apiClient.getPublicTenantIntel(trimmed);
-      setPage({ status: "success", result });
-    } catch (err: unknown) {
-      setPage({ status: "error", message: err instanceof Error ? err.message : "Unknown error" });
+      const token = localStorage.getItem('mg_token')
+      const headers: Record<string, string> = {}
+      if (token) headers['Authorization'] = `Bearer ${token}`
+      const res = await fetch(`/api/v2/public-intel/${encodeURIComponent(d)}?platform=${platform}`, { headers })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error((body as { detail?: string }).detail ?? `HTTP ${res.status}`)
+      }
+      setResult(await res.json() as ScanResult)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Scan failed')
+    } finally {
+      setLoading(false)
     }
-  };
+  }
+
+  const ev = result?.evidence as Record<string, unknown> | undefined
+  const findings = result?.findings ?? []
 
   return (
-    <div style={{
-      minHeight: "100vh",
-      backgroundColor: colors.bgBase,
-      fontFamily: fonts.ui,
-      color: colors.textPrimary,
-      padding: "40px 32px",
-    }}>
-      {/* Header */}
-      <div style={{ marginBottom: 32 }}>
-        <div style={{
-          fontSize: 11,
-          fontFamily: fonts.mono,
-          color: colors.cyan,
-          letterSpacing: "0.12em",
-          marginBottom: 8,
-          opacity: 0.8,
-        }}>
-          PUBLIC TENANT INTELLIGENCE
+    <div>
+      {/* Sticky header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '18px 32px', borderBottom: '1px solid var(--border)', background: 'rgba(8,12,18,0.85)', backdropFilter: 'blur(10px)', position: 'sticky', top: 0, zIndex: 5 }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h1 style={{ fontSize: 20, fontWeight: 600 }}>Public Tenant Intelligence</h1>
+            <span style={{ padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 500, background: 'rgba(0,229,255,0.08)', color: 'var(--accent)', border: '1px solid rgba(0,229,255,0.2)' }}>
+              Public Intel
+            </span>
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
+            Discover publicly observable tenant signals for a domain
+          </p>
         </div>
-        <h1 style={{ margin: 0, fontSize: 26, fontWeight: 600, color: colors.textPrimary }}>
-          M365 Tenant Discovery
-        </h1>
-        <p style={{ margin: "8px 0 0", color: colors.textSecondary, fontSize: 14 }}>
-          Discover publicly visible Microsoft 365 tenant signals using only unauthenticated sources.
-        </p>
       </div>
 
-      {/* Input */}
-      <DomainSelector
-        tenantList={MOCK_TENANTS}
-        selectedTenant={selectedTenant}
-        domain={domain}
-        onTenantChange={setSelectedTenant}
-        onDomainChange={setDomain}
-        onScan={handleScan}
-        loading={page.status === "loading"}
-        accentColor={colors.cyan}
-      />
+      <div style={{ padding: '28px 32px', maxWidth: 860 }}>
 
-      {/* Loading */}
-      {page.status === "loading" && (
-        <div style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          color: colors.textSecondary,
-          fontSize: 13,
-          fontFamily: fonts.mono,
-        }}>
-          <span style={{ color: colors.cyan, animation: "pulse 1.2s infinite" }}>▋</span>
-          Querying public Microsoft endpoints…
+        {/* Domain input row */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 8 }}>
+          <input
+            value={domain}
+            onChange={e => handleDomainChange(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleScan()}
+            placeholder="example.com"
+            style={{ flex: 1, padding: '10px 16px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 14, fontFamily: 'var(--font-mono)', outline: 'none' }}
+          />
+          {/* Platform selector */}
+          <select
+            value={platform}
+            onChange={e => setPlatform(e.target.value)}
+            style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: 13, fontFamily: 'var(--font-body)', cursor: 'pointer', outline: 'none' }}
+          >
+            <option value="microsoft365">Microsoft 365</option>
+            <option value="google_workspace">Google Workspace</option>
+          </select>
+          <button
+            onClick={handleScan}
+            disabled={loading || !domain.trim()}
+            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 22px', borderRadius: 8, background: loading || !domain.trim() ? 'var(--surface2)' : 'var(--accent)', color: loading || !domain.trim() ? 'var(--muted)' : '#000', border: 'none', cursor: loading || !domain.trim() ? 'not-allowed' : 'pointer', fontSize: 13, fontWeight: 700, fontFamily: 'var(--font-body)', transition: 'all .15s' }}
+          >
+            {loading ? '⟳ Scanning…' : '🔍 Scan'}
+          </button>
         </div>
-      )}
 
-      {/* Error */}
-      {page.status === "error" && (
-        <div style={{
-          padding: "14px 18px",
-          backgroundColor: colors.redSubtle,
-          border: `1px solid ${colors.redDim}`,
-          borderRadius: radius.md,
-          color: colors.red,
-          fontSize: 13,
-          fontFamily: fonts.mono,
-          maxWidth: 640,
-        }}>
-          <span style={{ opacity: 0.6 }}>ERROR: </span>{page.message}
+        {/* Scope indicator */}
+        <div style={{ marginBottom: 20, fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 10, minHeight: 18 }}>
+          {!isOverride && activeDomain && (
+            <span style={{ color: 'rgba(0,229,255,0.6)' }}>🔵 Active scope: {activeDomain}</span>
+          )}
+          {isOverride && (
+            <>
+              <span style={{ color: 'rgba(249,115,22,0.8)' }}>↩ Override — not updating global scope</span>
+              <button
+                onClick={() => {
+                  const d = domain.trim().toLowerCase()
+                  addToSelectableDomains(d)
+                  setActiveDomain(d)
+                  userHasOverridden.current = false
+                }}
+                style={{ background: 'none', border: '1px solid rgba(0,229,255,0.25)', borderRadius: 4, color: 'var(--accent)', cursor: 'pointer', fontSize: 10, padding: '2px 8px', fontFamily: 'var(--font-body)' }}
+              >
+                Set as active scope
+              </button>
+            </>
+          )}
         </div>
-      )}
 
-      {/* Results */}
-      {page.status === "success" && (
-        <div style={{ maxWidth: 800 }}>
-          {/* Meta bar */}
-          <div style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            marginBottom: 20,
-            padding: "10px 16px",
-            backgroundColor: colors.bgSurface,
-            border: `1px solid ${colors.borderFaint}`,
-            borderRadius: radius.md,
-            flexWrap: "wrap",
-          }}>
-            <span style={{
-              padding: "2px 10px",
-              borderRadius: 12,
-              fontSize: 10,
-              fontWeight: 700,
-              fontFamily: fonts.mono,
-              letterSpacing: "0.06em",
-              backgroundColor: colors.greenDim,
-              color: colors.green,
-            }}>
-              {page.result.status.toUpperCase()}
-            </span>
-            <span style={{ fontSize: 11, fontFamily: fonts.mono, color: colors.textMuted }}>
-              SCAN {page.result.scan_id.split("-")[0].toUpperCase()}
-            </span>
-            <span style={{ marginLeft: "auto", fontSize: 11, fontFamily: fonts.mono, color: colors.textMuted }}>
-              {page.result.timestamp}
-            </span>
+        {/* Error */}
+        {error && (
+          <div style={{ display: 'flex', gap: 10, padding: '12px 16px', marginBottom: 20, background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8 }}>
+            <span style={{ fontSize: 13, color: '#ef4444' }}>⚠ {error}</span>
           </div>
+        )}
 
-          <SummaryCard summary={page.result.evidence} />
-
-          {/* Findings */}
-          <div style={cardStyle}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-              <span style={{ width: 3, height: 18, backgroundColor: colors.amber, borderRadius: 2, display: "inline-block" }} />
-              <h3 style={{ margin: 0, fontSize: 14, fontWeight: 600, letterSpacing: "0.04em" }}>
-                FINDINGS
-              </h3>
-              <span style={{
-                marginLeft: 4,
-                padding: "1px 8px",
-                borderRadius: 10,
-                fontSize: 11,
-                fontFamily: fonts.mono,
-                backgroundColor: colors.bgElevated,
-                color: colors.textSecondary,
-                border: `1px solid ${colors.borderSubtle}`,
-              }}>
-                {page.result.findings.length}
-              </span>
+        {/* Results */}
+        {result && ev && (
+          <>
+            {/* Summary card */}
+            <div style={{ marginBottom: 20, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, padding: '18px 22px' }}>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>{ev.domain as string} · {platform}</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                {ev.tenant_id && (
+                  <div style={{ padding: '8px 14px', borderRadius: 8, background: 'rgba(0,120,212,0.08)', border: '1px solid rgba(0,120,212,0.2)' }}>
+                    <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 2 }}>Tenant ID</div>
+                    <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>{ev.tenant_id as string}</div>
+                  </div>
+                )}
+                {ev.tenant_name && (
+                  <div style={{ padding: '8px 14px', borderRadius: 8, background: 'rgba(0,120,212,0.08)', border: '1px solid rgba(0,120,212,0.2)' }}>
+                    <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 2 }}>Tenant Name</div>
+                    <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>{ev.tenant_name as string}</div>
+                  </div>
+                )}
+                {ev.region && (
+                  <div style={{ padding: '8px 14px', borderRadius: 8, background: 'rgba(0,120,212,0.08)', border: '1px solid rgba(0,120,212,0.2)' }}>
+                    <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 2 }}>Region</div>
+                    <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>{ev.region as string}</div>
+                  </div>
+                )}
+              </div>
             </div>
-            {page.result.findings.length === 0
-              ? <p style={{ color: colors.textMuted, fontSize: 13 }}>No findings returned.</p>
-              : page.result.findings.map(f => <FindingRow key={f.id} finding={f} />)
-            }
-          </div>
-        </div>
-      )}
 
-      <style>{`
-        @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.2 } }
-        input::placeholder { color: ${colors.textMuted}; }
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: ${colors.bgBase}; }
-        ::-webkit-scrollbar-thumb { background: ${colors.borderActive}; border-radius: 3px; }
-      `}</style>
+            {/* Findings */}
+            {findings.length > 0 && (
+              <Collapsible title={`Intelligence Findings (${findings.length})`} icon="🔍" defaultOpen>
+                {findings.map(f => <FindingRow key={f.id} f={f} />)}
+              </Collapsible>
+            )}
+
+            {/* Raw evidence */}
+            <Collapsible title="Raw Evidence" icon="🗂">
+              {Object.entries(ev)
+                .filter(([k]) => !['domain'].includes(k))
+                .map(([k, v]) => (
+                  <KV key={k} label={k.replace(/_/g, ' ')} value={typeof v === 'object' ? JSON.stringify(v) : String(v ?? '—')} />
+                ))}
+              <div style={{ marginTop: 8, fontSize: 11, color: 'var(--muted)' }}>
+                Scan completed at {new Date(result.timestamp).toLocaleString()}
+              </div>
+            </Collapsible>
+          </>
+        )}
+
+        {/* Empty state */}
+        {!result && !loading && !error && (
+          <div style={{ textAlign: 'center', padding: '80px 0' }}>
+            <div style={{ fontSize: 44, marginBottom: 16, opacity: 0.35 }}>🔎</div>
+            <div style={{ fontSize: 14, color: 'var(--muted)', marginBottom: 8 }}>Enter a domain to discover public tenant signals</div>
+            <div style={{ fontSize: 12, color: 'var(--muted)', opacity: 0.7 }}>
+              Identifies publicly observable Microsoft 365 or Google Workspace tenant information.
+            </div>
+          </div>
+        )}
+      </div>
     </div>
-  );
+  )
 }

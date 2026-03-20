@@ -1,41 +1,48 @@
 """
-auth_analyzer.py — MailGuard V2 / Authentication Health
+auth_analyzer.py — MailGuard V2 / Authentication Health  (v2.1)
 
-Evaluates email authentication posture for a domain:
-  SPF   — record presence, policy strength, DNS lookup limits, sending providers
-  DMARC — policy enforcement, subdomain policy, pct, reporting addresses, alignment
-  DKIM  — common selector discovery, key strength, platform identification
+Upgrade summary over v2.0:
+  - Scoring rebuilt: SPF(30) + DMARC(35) + DKIM(25) + Cross(10) = 100
+  - Provider-aware DKIM selector discovery — prioritises selectors for the
+    detected sending platform before falling back to the generic list
+  - MX-based provider detection — supplements SPF/DKIM signal
+  - DMARC external reporting authorisation check (RFC 7489 §7.1)
+  - SPF-only alignment dependency finding — DMARC p=reject/quarantine
+    with no DKIM means forwarded mail will break authentication
+  - Sender platform consistency analysis — catches SPF providers not
+    corroborated by DKIM or MX (potential orphaned authorisations)
+  - Richer finding format — every finding includes an `impact` key in
+    its evidence dict for structured display in the UI
 
-Scoring convention (matches V2 standard):
-  score         — exposure/risk score, 0–100, HIGHER = more exposed / worse posture
-  health_score  — returned inside evidence, 0–100, HIGHER = healthier configuration
-
-Findings emitted (id scheme: auth-{protocol}-{check}-{domain}):
-  auth-spf-missing-{domain}          CRITICAL  No SPF record
-  auth-spf-multiple-{domain}         CRITICAL  More than one SPF record
-  auth-spf-pass-all-{domain}         CRITICAL  +all qualifier
-  auth-spf-softfail-{domain}         MEDIUM    ~all qualifier
-  auth-spf-neutral-{domain}          MEDIUM    ?all qualifier
-  auth-spf-no-terminator-{domain}    MEDIUM    No 'all' mechanism
-  auth-spf-ptr-{domain}              LOW       ptr mechanism in use
-  auth-spf-lookup-exceeded-{domain}  CRITICAL  >10 DNS lookups
-  auth-spf-lookup-warning-{domain}   MEDIUM    9–10 DNS lookups
-  auth-dmarc-missing-{domain}        CRITICAL  No DMARC record
-  auth-dmarc-multiple-{domain}       CRITICAL  More than one DMARC record
-  auth-dmarc-none-{domain}           MEDIUM    p=none (monitoring only)
-  auth-dmarc-quarantine-{domain}     LOW       p=quarantine (not full reject)
-  auth-dmarc-pct-partial-{domain}    MEDIUM    pct < 100
-  auth-dmarc-no-reporting-{domain}   LOW       No rua= configured
-  auth-dmarc-weak-subdomain-{domain} MEDIUM    sp= weaker than p=
-  auth-dkim-missing-{domain}         MEDIUM    No selectors found
-  auth-dkim-weak-key-{selector}      CRITICAL  Key < 1024 bits
-  auth-dkim-short-key-{selector}     LOW       Key 1024–2047 bits
-  auth-cross-gap-{domain}            CRITICAL  DMARC present but no SPF or DKIM
-  auth-cross-no-dmarc-spf-{domain}   MEDIUM    SPF only, no DMARC
-  auth-cross-no-dmarc-dkim-{domain}  MEDIUM    DKIM only, no DMARC
-  auth-cross-weak-triangle-{domain}  MEDIUM    Weak DMARC + weak SPF + no DKIM
-  auth-cross-provider-mismatch-{d}   LOW       SPF and DKIM authorise different providers
-  auth-summary-{domain}              INFO      Lead finding with overview
+Finding id scheme: auth-{protocol}-{check}-{domain}
+  auth-spf-missing-{d}                  CRITICAL
+  auth-spf-multiple-{d}                 CRITICAL
+  auth-spf-pass-all-{d}                 CRITICAL
+  auth-spf-softfail-{d}                 MEDIUM
+  auth-spf-neutral-{d}                  MEDIUM
+  auth-spf-no-terminator-{d}            MEDIUM
+  auth-spf-ptr-{d}                      LOW
+  auth-spf-lookup-exceeded-{d}          CRITICAL
+  auth-spf-lookup-warning-{d}           MEDIUM
+  auth-dmarc-missing-{d}                CRITICAL
+  auth-dmarc-multiple-{d}               CRITICAL
+  auth-dmarc-none-{d}                   MEDIUM
+  auth-dmarc-quarantine-{d}             LOW
+  auth-dmarc-pct-partial-{d}            MEDIUM
+  auth-dmarc-no-reporting-{d}           LOW
+  auth-dmarc-weak-subdomain-{d}         MEDIUM
+  auth-dmarc-ext-reporting-{d}          INFO   (new)
+  auth-dkim-missing-{d}                 MEDIUM
+  auth-dkim-weak-key-{sel}              CRITICAL
+  auth-dkim-short-key-{sel}             LOW
+  auth-cross-gap-{d}                    CRITICAL
+  auth-cross-spf-only-alignment-{d}     MEDIUM  (new)
+  auth-cross-no-dmarc-spf-{d}           MEDIUM
+  auth-cross-no-dmarc-dkim-{d}          MEDIUM
+  auth-cross-weak-triangle-{d}          MEDIUM
+  auth-cross-platform-consistency-{d}   LOW     (new)
+  auth-cross-provider-mismatch-{d}      LOW
+  auth-summary-{d}                      INFO
 """
 
 import asyncio
@@ -46,7 +53,7 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import dns.asyncresolver
 import dns.resolver
@@ -57,89 +64,184 @@ from app.models.v2.finding import Finding
 
 logger = logging.getLogger(__name__)
 
-MODULE_VERSION = "v2.0"
+MODULE_VERSION = "v2.1"
 
-# ── DKIM selector candidates ──────────────────────────────────────────────────
-DKIM_SELECTORS = [
+# ---------------------------------------------------------------------------
+# Scoring model
+#
+# Health score = SPF_pts + DMARC_pts + DKIM_pts + Cross_pts  (max 100)
+#
+# Calibration:
+#   SPF -all (30) + DMARC p=reject pct=100 (35) + DKIM missing (0) + Cross (6) = 71
+#   Matches spec target of ~70-75 for this configuration.
+# ---------------------------------------------------------------------------
+
+SPF_SCORE = {
+    "missing":             0,
+    "multiple":            6,
+    "+all":                5,
+    "?all":               12,
+    "missing_terminator": 14,
+    "~all":               22,
+    "-all":               30,
+}
+SPF_DEDUCT_LOOKUP_EXCEEDED = 3
+SPF_DEDUCT_PTR             = 1
+
+DMARC_SCORE = {
+    "missing":           0,
+    "multiple":          4,
+    "none":              8,
+    "quarantine_partial": 16,
+    "quarantine_full":   22,
+    "reject_partial":    27,
+    "reject_full":       35,
+}
+
+DKIM_SCORE = {
+    "missing":    0,
+    "weak_key":   8,
+    "short_key": 18,
+    "present":   25,
+}
+
+CROSS_SCORE = {
+    "all_three_enforcing":  10,
+    "spf_dmarc_only":        6,
+    "dmarc_dkim_only":       5,
+    "spf_dkim_no_dmarc":     3,
+    "dmarc_no_spf_dkim":     2,
+    "nothing_enforcing":     0,
+}
+
+# ---------------------------------------------------------------------------
+# Provider catalogues
+# ---------------------------------------------------------------------------
+
+SPF_PROVIDER_MAP: Dict[str, str] = {
+    "spf.protection.outlook.com":   "Microsoft 365",
+    "_spf.google.com":              "Google Workspace",
+    "sendgrid.net":                 "SendGrid",
+    "amazonses.com":                "Amazon SES",
+    "mailgun.org":                  "Mailgun",
+    "spf.mandrillapp.com":          "Mandrill (Mailchimp)",
+    "spf.mailchimp.com":            "Mailchimp",
+    "servers.mcsv.net":             "Mailchimp",
+    "pm.mtasv.net":                 "Postmark",
+    "_spf.salesforce.com":          "Salesforce",
+    "spf.exacttarget.com":          "Salesforce Marketing Cloud",
+    "spf.hubspot.com":              "HubSpot",
+    "spf.marketo.com":              "Marketo",
+    "mktomail.com":                 "Marketo",
+    "spf.zohomail.com":             "Zoho Mail",
+    "pphosted.com":                 "Proofpoint",
+    "ppe-hosted.com":               "Proofpoint Essentials",
+    "mimecast.com":                 "Mimecast",
+    "barracudanetworks.com":        "Barracuda",
+    "iphmx.com":                    "Cisco IronPort",
+    "ess.cisco.com":                "Cisco Email Security",
+    "mailcontrol.com":              "Forcepoint",
+    "messagelabs.com":              "Broadcom (MessageLabs)",
+    "symanteccloud.com":            "Broadcom (Symantec)",
+    "sparkpostmail.com":            "SparkPost",
+    "freshdesk.com":                "Freshdesk",
+    "spf1.eloqua.com":              "Oracle Eloqua",
+    "zendesk.com":                  "Zendesk",
+    "intercom.io":                  "Intercom",
+}
+
+MX_PROVIDER_MAP: Dict[str, str] = {
+    "mail.protection.outlook.com":  "Microsoft 365",
+    "protection.outlook.com":       "Microsoft 365",
+    "google.com":                   "Google Workspace",
+    "googlemail.com":               "Google Workspace",
+    "aspmx.l.google.com":           "Google Workspace",
+    "pphosted.com":                 "Proofpoint",
+    "ppe-hosted.com":               "Proofpoint Essentials",
+    "mimecast.com":                 "Mimecast",
+    "barracudanetworks.com":        "Barracuda",
+    "iphmx.com":                    "Cisco IronPort",
+    "messagelabs.com":              "Broadcom (MessageLabs)",
+    "symanteccloud.com":            "Broadcom (Symantec)",
+    "mailcontrol.com":              "Forcepoint",
+    "hornetsecurity.com":           "Hornetsecurity",
+    "antispamcloud.com":            "Hornetsecurity",
+    "emailsrvr.com":                "Rackspace",
+    "zoho.com":                     "Zoho Mail",
+}
+
+DKIM_SELECTOR_PLATFORM_MAP: Dict[str, str] = {
+    "selector1":    "Microsoft 365",
+    "selector2":    "Microsoft 365",
+    "google":       "Google Workspace",
+    "sendgrid":     "SendGrid",
+    "s1":           "SendGrid",
+    "s2":           "SendGrid",
+    "sm":           "Mandrill",
+    "pm":           "Postmark",
+    "postmarkapp":  "Postmark",
+    "mandrill":     "Mandrill",
+    "mailgun":      "Mailgun",
+    "k1":           "Mailchimp",
+    "k2":           "Mailchimp",
+    "mxvault":      "Mimecast",
+    "proofpoint":   "Proofpoint",
+    "pphosted":     "Proofpoint",
+}
+
+# Provider-specific selectors to try first (before the generic list)
+PROVIDER_PRIORITY_SELECTORS: Dict[str, List[str]] = {
+    "Microsoft 365":              ["selector1", "selector2"],
+    "Google Workspace":           ["google", "default"],
+    "Proofpoint":                 ["proofpoint", "pphosted", "selector1", "selector2"],
+    "Proofpoint Essentials":      ["proofpoint", "selector1", "selector2"],
+    "Mimecast":                   ["mxvault", "selector1", "selector2"],
+    "SendGrid":                   ["s1", "s2", "sendgrid"],
+    "Mailchimp":                  ["k1", "k2"],
+    "Mandrill (Mailchimp)":       ["sm"],
+    "Postmark":                   ["pm", "postmarkapp"],
+    "Mailgun":                    ["mailgun"],
+    "Amazon SES":                 ["mail", "email", "smtp"],
+    "Salesforce":                 ["selector1", "selector2", "mail"],
+    "Salesforce Marketing Cloud": ["selector1", "selector2", "mail"],
+    "HubSpot":                    ["selector1", "selector2"],
+    "Barracuda":                  ["selector1", "selector2"],
+    "Cisco IronPort":             ["selector1", "selector2"],
+    "Cisco Email Security":       ["selector1", "selector2"],
+    "Forcepoint":                 ["selector1", "selector2"],
+    "Broadcom (MessageLabs)":     ["selector1", "selector2"],
+    "Broadcom (Symantec)":        ["selector1", "selector2"],
+    "Zoho Mail":                  ["zoho", "mail", "selector1"],
+    "SparkPost":                  ["scph", "selector1", "selector2"],
+}
+
+GENERIC_SELECTORS: List[str] = [
     "selector1", "selector2", "default", "google", "k1", "k2",
-    "smtp", "mail", "dkim", "s1", "s2", "email", "key1", "key2",
-    "mxvault", "mx", "proofpoint", "mimecast", "sm",
-    "pm", "postmarkapp", "mandrill", "mailgun", "sendgrid",
+    "smtp", "mail", "dkim", "mta", "email", "s1", "s2", "key1", "key2",
+    "mxvault", "mx", "proofpoint", "mimecast", "sm", "pm",
+    "postmarkapp", "mandrill", "mailgun", "sendgrid",
 ]
 
-# ── SPF include → sending platform ───────────────────────────────────────────
-SPF_PROVIDER_MAP: Dict[str, str] = {
-    "spf.protection.outlook.com":  "Microsoft 365",
-    "_spf.google.com":             "Google Workspace",
-    "sendgrid.net":                "SendGrid",
-    "amazonses.com":               "Amazon SES",
-    "mailgun.org":                 "Mailgun",
-    "spf.mandrillapp.com":         "Mandrill (Mailchimp)",
-    "spf.mailchimp.com":           "Mailchimp",
-    "servers.mcsv.net":            "Mailchimp",
-    "pm.mtasv.net":                "Postmark",
-    "_spf.salesforce.com":         "Salesforce",
-    "spf.exacttarget.com":         "Salesforce Marketing Cloud",
-    "spf.hubspot.com":             "HubSpot",
-    "spf.marketo.com":             "Marketo",
-    "spf.zohomail.com":            "Zoho Mail",
-    "pphosted.com":                "Proofpoint",
-    "ppe-hosted.com":              "Proofpoint Essentials",
-    "mimecast.com":                "Mimecast",
-    "barracudanetworks.com":       "Barracuda",
-    "iphmx.com":                   "Cisco IronPort",
-    "mailcontrol.com":             "Forcepoint",
-    "messagelabs.com":             "Broadcom (MessageLabs)",
-    "sparkpostmail.com":           "SparkPost",
-    "mktomail.com":                "Marketo",
-    "freshdesk.com":               "Freshdesk",
-}
 
-# ── DKIM selector → sending platform ─────────────────────────────────────────
-DKIM_SELECTOR_PLATFORM_MAP: Dict[str, str] = {
-    "selector1":   "Microsoft 365",
-    "selector2":   "Microsoft 365",
-    "google":      "Google Workspace",
-    "sendgrid":    "SendGrid",
-    "s1":          "SendGrid",
-    "s2":          "SendGrid",
-    "sm":          "Mandrill",
-    "pm":          "Postmark",
-    "postmarkapp": "Postmark",
-    "mandrill":    "Mandrill",
-    "mailgun":     "Mailgun",
-    "k1":          "Mailchimp",
-    "k2":          "Mailchimp",
-    "mxvault":     "Mimecast",
-    "proofpoint":  "Proofpoint",
-}
-
-# ── Exposure score contributions (higher = more exposed) ─────────────────────
-EXPOSURE = {
-    "spf_missing":          25,
-    "spf_multiple":         20,
-    "spf_plus_all":         25,
-    "spf_softfail":         10,
-    "spf_neutral":          10,
-    "spf_no_terminator":    10,
-    "spf_ptr":               5,
-    "spf_lookup_exceeded":  10,
-    "spf_lookup_warning":    5,
-    "dmarc_missing":        30,
-    "dmarc_multiple":       25,
-    "dmarc_none":           15,
-    "dmarc_quarantine":      5,
-    "dmarc_pct_partial":     5,
-    "dkim_missing":         15,
-    "dkim_weak_key":        15,
-    "dkim_short_key":        5,
-    "cross_auth_gap":       15,
-}
+def _build_selector_list(detected_providers: List[str]) -> List[str]:
+    """Build a deduplicated, prioritised DKIM selector list."""
+    ordered: List[str] = []
+    for provider in detected_providers:
+        for sel in PROVIDER_PRIORITY_SELECTORS.get(provider, []):
+            if sel not in ordered:
+                ordered.append(sel)
+    for sel in GENERIC_SELECTORS:
+        if sel not in ordered:
+            ordered.append(sel)
+    return ordered
 
 
-# ── DNS helpers ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# DNS helpers
+# ---------------------------------------------------------------------------
 
 async def _resolve_txt(name: str) -> List[str]:
+    """Resolve TXT records; return empty list on any failure."""
     try:
         resolver = dns.asyncresolver.Resolver()
         resolver.timeout = 4
@@ -157,8 +259,23 @@ async def _resolve_txt(name: str) -> List[str]:
         return []
 
 
+async def _resolve_mx_hosts(domain: str) -> List[str]:
+    """Resolve MX records and return the list of mail host names."""
+    try:
+        resolver = dns.asyncresolver.Resolver()
+        resolver.timeout = 4
+        resolver.lifetime = 6
+        answers = await resolver.resolve(domain, "MX")
+        return [str(r.exchange).lower().rstrip(".") for r in answers]
+    except Exception:
+        return []
+
+
 async def _resolve_dkim(selector: str, domain: str) -> dict:
-    """Attempt to retrieve one DKIM public key record. Returns a result dict."""
+    """
+    Attempt to retrieve one DKIM public key TXT record.
+    Returns a result dict with: selector, fqdn, valid, record, key_type, key_bits, platform.
+    """
     fqdn = f"{selector}._domainkey.{domain}"
     records = await _resolve_txt(fqdn)
     if not records:
@@ -167,11 +284,9 @@ async def _resolve_dkim(selector: str, domain: str) -> dict:
     record = records[0]
     result: dict = {"selector": selector, "fqdn": fqdn, "valid": True, "record": record}
 
-    # Key type
     kt = re.search(r'\bk=(\w+)', record)
     result["key_type"] = kt.group(1).lower() if kt else "rsa"
 
-    # Key size estimate
     p = re.search(r'\bp=([A-Za-z0-9+/=]+)', record)
     if p:
         b64 = p.group(1)
@@ -185,12 +300,16 @@ async def _resolve_dkim(selector: str, domain: str) -> dict:
             except Exception:
                 pass
 
-    # Platform from selector name or record content
     result["platform"] = DKIM_SELECTOR_PLATFORM_MAP.get(selector)
     if not result["platform"]:
         rl = record.lower()
-        for kw, platform in [("google", "Google Workspace"), ("outlook", "Microsoft 365"),
-                               ("sendgrid", "SendGrid"), ("mailgun", "Mailgun")]:
+        for kw, platform in [
+            ("google",   "Google Workspace"),
+            ("outlook",  "Microsoft 365"),
+            ("sendgrid", "SendGrid"),
+            ("mailgun",  "Mailgun"),
+            ("amazon",   "Amazon SES"),
+        ]:
             if kw in rl:
                 result["platform"] = platform
                 break
@@ -198,99 +317,163 @@ async def _resolve_dkim(selector: str, domain: str) -> dict:
     return result
 
 
-# ── Internal analysis dataclasses ─────────────────────────────────────────────
+async def _check_dmarc_external_reporting_auth(
+    domain: str,
+    reporting_addresses: List[str],
+) -> List[str]:
+    """
+    RFC 7489 §7.1: verify external DMARC reporting authorisation.
+
+    When rua/ruf points to an external domain, that domain must publish:
+      {domain}._report._dmarc.{external-domain}  TXT  "v=DMARC1;"
+
+    Returns a list of external domains that are NOT authorised.
+    """
+    unauthorised: List[str] = []
+    checked: set = set()
+
+    for addr in reporting_addresses:
+        m = re.search(r'mailto:[^@]+@([\w.\-]+)', addr, re.IGNORECASE)
+        if not m:
+            continue
+        ext_domain = m.group(1).lower()
+        if ext_domain == domain or ext_domain in checked:
+            continue
+        domain_apex = ".".join(domain.split(".")[-2:])
+        ext_apex    = ".".join(ext_domain.split(".")[-2:])
+        if domain_apex == ext_apex:
+            checked.add(ext_domain)
+            continue
+        checked.add(ext_domain)
+        auth_fqdn = f"{domain}._report._dmarc.{ext_domain}"
+        records   = await _resolve_txt(auth_fqdn)
+        is_authorised = any(r.lower().startswith("v=dmarc1") for r in records)
+        if not is_authorised:
+            unauthorised.append(ext_domain)
+
+    return unauthorised
+
+
+# ---------------------------------------------------------------------------
+# Internal analysis dataclasses
+# ---------------------------------------------------------------------------
 
 @dataclass
 class _SpfAnalysis:
-    present: bool = False
-    record: Optional[str] = None
-    policy: Optional[str] = None
-    multiple: bool = False
-    includes: List[str] = field(default_factory=list)
+    present:      bool = False
+    record:       Optional[str] = None
+    policy:       Optional[str] = None
+    multiple:     bool = False
+    includes:     List[str] = field(default_factory=list)
     lookup_count: int = 0
-    providers: List[str] = field(default_factory=list)
-    exposure: int = 0
-    findings: List[Finding] = field(default_factory=list)
+    providers:    List[str] = field(default_factory=list)
+    score:        int = 0
+    findings:     List[Finding] = field(default_factory=list)
 
 
 @dataclass
 class _DmarcAnalysis:
-    present: bool = False
-    record: Optional[str] = None
-    policy: Optional[str] = None
+    present:          bool = False
+    record:           Optional[str] = None
+    policy:           Optional[str] = None
     subdomain_policy: Optional[str] = None
-    pct: int = 100
-    rua: List[str] = field(default_factory=list)
-    ruf: List[str] = field(default_factory=list)
-    aspf: str = "r"
-    adkim: str = "r"
-    multiple: bool = False
-    exposure: int = 0
-    findings: List[Finding] = field(default_factory=list)
+    pct:              int = 100
+    rua:              List[str] = field(default_factory=list)
+    ruf:              List[str] = field(default_factory=list)
+    aspf:             str = "r"
+    adkim:            str = "r"
+    multiple:         bool = False
+    score:            int = 0
+    findings:         List[Finding] = field(default_factory=list)
 
 
 @dataclass
 class _DkimAnalysis:
-    selectors: List[dict] = field(default_factory=list)
+    selectors:         List[dict] = field(default_factory=list)
+    providers:         List[str] = field(default_factory=list)
+    selectors_checked: List[str] = field(default_factory=list)
+    score:             int = 0
+    findings:          List[Finding] = field(default_factory=list)
+
+
+@dataclass
+class _MxAnalysis:
+    hosts:     List[str] = field(default_factory=list)
     providers: List[str] = field(default_factory=list)
-    exposure: int = 0
-    findings: List[Finding] = field(default_factory=list)
 
 
-# ── SPF analysis ──────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Phase 2 — SPF analysis
+# ---------------------------------------------------------------------------
+
+def _extract_spf_providers(a: _SpfAnalysis, record: str) -> None:
+    rl = record.lower()
+    for pattern, provider in SPF_PROVIDER_MAP.items():
+        if pattern in rl and provider not in a.providers:
+            a.providers.append(provider)
+
 
 def _analyze_spf(domain: str, txt_records: List[str]) -> _SpfAnalysis:
     a = _SpfAnalysis()
     spf_records = [r for r in txt_records if r.lower().startswith("v=spf1")]
 
     if not spf_records:
-        a.exposure += EXPOSURE["spf_missing"]
+        a.score = SPF_SCORE["missing"]
         a.findings.append(Finding(
             id=f"auth-spf-missing-{domain}",
             category="authentication",
             severity="critical",
             title="No SPF record found",
             description=(
-                f"{domain} has no SPF record. Any server on the internet can send email "
-                "that appears to originate from this domain. SPF is the baseline mechanism "
-                "that allows receiving servers to verify authorised sending infrastructure."
+                f"{domain} has no SPF record. Any mail server can send email claiming "
+                "to originate from this domain and pass SPF evaluation."
             ),
             recommended_action=(
-                "Publish a TXT record at the domain root specifying authorised senders. "
-                "At minimum: v=spf1 include:<your-provider> -all"
+                "Publish a TXT record at the domain root specifying authorised senders, "
+                "e.g. v=spf1 include:spf.protection.outlook.com -all"
             ),
-            evidence={"domain": domain, "txt_records_checked": txt_records},
+            evidence={
+                "domain": domain,
+                "impact": (
+                    "Phishing campaigns using this domain as the envelope sender will not "
+                    "trigger SPF failures, reducing the effectiveness of downstream filters."
+                ),
+            },
         ))
         return a
 
     if len(spf_records) > 1:
-        a.present = True
-        a.record = spf_records[0]
+        a.present  = True
+        a.record   = spf_records[0]
         a.multiple = True
-        a.exposure += EXPOSURE["spf_multiple"]
+        a.score    = SPF_SCORE["multiple"]
         a.findings.append(Finding(
             id=f"auth-spf-multiple-{domain}",
             category="authentication",
             severity="critical",
-            title=f"Multiple SPF records found ({len(spf_records)})",
+            title=f"Multiple SPF records detected ({len(spf_records)})",
             description=(
-                f"{domain} has {len(spf_records)} SPF TXT records. RFC 7208 requires exactly one. "
-                "When multiple records are present, receiving servers will return a PermError and "
-                "SPF evaluation fails — effectively providing no protection."
+                f"{domain} has {len(spf_records)} SPF TXT records. RFC 7208 §3.2 permits "
+                "exactly one. Multiple records cause PermError — SPF evaluation fails entirely."
             ),
             recommended_action=(
-                "Merge all SPF records into a single TXT record. "
-                "Delete all but one and combine the mechanisms."
+                "Merge all mechanisms into a single TXT record and delete duplicates."
             ),
-            evidence={"records": spf_records},
+            evidence={
+                "records": spf_records,
+                "impact": (
+                    "SPF evaluation returns PermError. The domain receives no SPF "
+                    "protection until the duplicate is removed."
+                ),
+            },
         ))
+        _extract_spf_providers(a, spf_records[0])
         return a
 
     a.present = True
-    record = spf_records[0]
-    a.record = record
+    record    = spf_records[0]
+    a.record  = record
 
-    # Policy
     all_m = re.search(r'([+~\-?]?)all\b', record, re.IGNORECASE)
     if all_m:
         q = all_m.group(1) or "+"
@@ -298,228 +481,272 @@ def _analyze_spf(domain: str, txt_records: List[str]) -> _SpfAnalysis:
     else:
         a.policy = "missing"
 
+    policy_key_map = {
+        "+all": "+all", "~all": "~all", "-all": "-all",
+        "?all": "?all", "missing": "missing_terminator",
+    }
+    a.score = SPF_SCORE.get(policy_key_map.get(a.policy, "missing_terminator"), 0)
+
     if a.policy == "+all":
-        a.exposure += EXPOSURE["spf_plus_all"]
         a.findings.append(Finding(
             id=f"auth-spf-pass-all-{domain}",
             category="authentication",
             severity="critical",
-            title='SPF record uses "+all" — unrestricted spoofing allowed',
+            title='SPF record uses "+all" — unrestricted spoofing permitted',
             description=(
-                f'The SPF record for {domain} ends with "+all", which passes SPF for any server '
-                "on the internet. This is equivalent to having no SPF protection at all and "
-                "actively signals to phishing actors that spoofing this domain will pass SPF checks."
+                f'The SPF record for {domain} ends with "+all", which passes SPF for any IP. '
+                "This is equivalent to no SPF protection."
             ),
-            recommended_action='Replace "+all" with "-all" to explicitly reject unauthorised senders.',
-            evidence={"record": record},
+            recommended_action='Replace "+all" with "-all" immediately.',
+            evidence={
+                "record": record,
+                "impact": (
+                    "Any attacker can send mail as this domain and receive a PASS SPF result. "
+                    "DMARC enforcement becomes ineffective."
+                ),
+            },
         ))
     elif a.policy == "~all":
-        a.exposure += EXPOSURE["spf_softfail"]
         a.findings.append(Finding(
             id=f"auth-spf-softfail-{domain}",
             category="authentication",
             severity="medium",
-            title='SPF record uses "~all" (SoftFail) — unauthorised senders are tagged, not rejected',
+            title='SPF policy is "~all" (SoftFail) — unauthorised senders tagged, not rejected',
             description=(
-                f'The SPF record for {domain} ends with "~all". Unauthorised senders are tagged '
-                "as SoftFail but not rejected — many mail servers accept SoftFail messages and "
-                "deliver them to inboxes. Without a DMARC reject policy, this provides minimal "
-                "protection against spoofing attacks."
+                f'The SPF record for {domain} uses "~all". Unauthorised senders receive '
+                "SoftFail — most servers deliver these messages normally."
             ),
-            recommended_action='Upgrade to "-all" (HardFail) once all legitimate senders are in the SPF record.',
-            evidence={"record": record},
+            recommended_action='Upgrade to "-all" once all sending sources are confirmed.',
+            evidence={
+                "record": record,
+                "impact": (
+                    "Spoofed mail is tagged but not blocked. Without DMARC enforcement, "
+                    "recipients still receive the message."
+                ),
+            },
         ))
     elif a.policy == "?all":
-        a.exposure += EXPOSURE["spf_neutral"]
         a.findings.append(Finding(
             id=f"auth-spf-neutral-{domain}",
             category="authentication",
             severity="medium",
-            title='SPF record uses "?all" (Neutral) — provides no spoofing protection',
+            title='SPF policy is "?all" (Neutral) — equivalent to no SPF policy',
             description=(
-                f'The SPF record for {domain} ends with "?all". A Neutral result provides no '
-                "guidance to receiving servers — it is treated the same as having no SPF policy. "
-                "Any server can send as this domain without triggering an SPF failure."
+                f'The SPF record for {domain} ends with "?all". Neutral provides no '
+                "guidance — treated identically to having no SPF policy."
             ),
-            recommended_action='Replace "?all" with "-all" to enforce SPF.',
-            evidence={"record": record},
+            recommended_action='Replace "?all" with "-all".',
+            evidence={
+                "record": record,
+                "impact": "Any sender passes SPF evaluation for this domain.",
+            },
         ))
     elif a.policy == "missing":
-        a.exposure += EXPOSURE["spf_no_terminator"]
         a.findings.append(Finding(
             id=f"auth-spf-no-terminator-{domain}",
             category="authentication",
             severity="medium",
-            title='SPF record has no "all" terminator — behaviour is undefined',
+            title='SPF record has no "all" terminator — behaviour is implementation-defined',
             description=(
-                f"The SPF record for {domain} does not include an 'all' mechanism. Without it, "
-                "receiving servers cannot determine what to do with mail from unlisted servers. "
-                "Behaviour is implementation-dependent and provides unpredictable protection."
+                f"The SPF record for {domain} has no 'all' mechanism. "
+                "RFC 7208 §5.1 defaults non-matching senders to Neutral."
             ),
-            recommended_action='Add "-all" to the end of the SPF record.',
-            evidence={"record": record},
+            recommended_action='Append "-all" to the SPF record.',
+            evidence={
+                "record": record,
+                "impact": "Unenforced SPF — unauthorised senders are not explicitly rejected.",
+            },
         ))
 
-    # ptr usage
     if re.search(r'\bptr\b', record, re.IGNORECASE):
-        a.exposure += EXPOSURE["spf_ptr"]
+        a.score = max(0, a.score - SPF_DEDUCT_PTR)
         a.findings.append(Finding(
             id=f"auth-spf-ptr-{domain}",
             category="authentication",
             severity="low",
             title='SPF record uses deprecated "ptr" mechanism',
             description=(
-                "The 'ptr' mechanism is deprecated per RFC 7208 §5.5 and causes extra DNS lookups "
-                "that count against the 10-lookup limit. It is slow, unreliable, and should be removed."
+                "The 'ptr' mechanism is deprecated per RFC 7208 §5.5. "
+                "It adds DNS lookups and is slow and unreliable."
             ),
-            recommended_action="Remove the 'ptr' mechanism and replace with 'ip4:', 'ip6:', or 'include:' as appropriate.",
-            evidence={"record": record},
+            recommended_action="Remove 'ptr' and replace with explicit ip4:, ip6:, or include: entries.",
+            evidence={
+                "record": record,
+                "impact": "Increases DNS lookup count; risks PermError on lookup-intensive records.",
+            },
         ))
 
-    # DNS lookup count
     lookup_mechs = re.findall(
-        r'\b(?:include|a|mx|ptr|exists|redirect)(?::|/|\s|$)', record, re.IGNORECASE
+        r'\b(?:include|a|mx|ptr|exists|redirect)(?::|/|\s|$)',
+        record, re.IGNORECASE,
     )
     a.lookup_count = len(lookup_mechs)
+
     if a.lookup_count > 10:
-        a.exposure += EXPOSURE["spf_lookup_exceeded"]
+        a.score = max(0, a.score - SPF_DEDUCT_LOOKUP_EXCEEDED)
         a.findings.append(Finding(
             id=f"auth-spf-lookup-exceeded-{domain}",
             category="authentication",
             severity="critical",
-            title=f"SPF record exceeds 10 DNS lookup limit ({a.lookup_count} lookups)",
+            title=f"SPF record exceeds 10 DNS lookup limit ({a.lookup_count} lookups detected)",
             description=(
-                f"RFC 7208 limits SPF evaluation to 10 DNS-intensive lookups. "
-                f"This record requires {a.lookup_count}. Receiving servers must return a PermError "
-                "and treat the SPF result as None — providing no authentication protection."
+                f"RFC 7208 §4.6.4 limits SPF to 10 DNS lookups. "
+                f"This record requires approximately {a.lookup_count}. Receivers return PermError."
             ),
             recommended_action=(
-                "Flatten SPF includes using a tool like dmarcian's SPF Surveyor. "
-                "Replace include: chains with direct ip4:/ip6: mechanisms where possible."
+                "Flatten SPF includes by replacing include: chains with direct ip4:/ip6: entries."
             ),
-            evidence={"record": record, "lookup_count": a.lookup_count},
+            evidence={
+                "record":       record,
+                "lookup_count": a.lookup_count,
+                "impact": (
+                    "SPF evaluation fails with PermError — the domain is treated as "
+                    "having no SPF record, removing all SPF-based protection."
+                ),
+            },
         ))
     elif a.lookup_count >= 9:
-        a.exposure += EXPOSURE["spf_lookup_warning"]
+        a.score = max(0, a.score - SPF_DEDUCT_LOOKUP_EXCEEDED)
         a.findings.append(Finding(
             id=f"auth-spf-lookup-warning-{domain}",
             category="authentication",
             severity="medium",
             title=f"SPF record approaching 10 DNS lookup limit ({a.lookup_count}/10)",
             description=(
-                f"This SPF record currently requires {a.lookup_count} DNS lookups. "
-                "Adding any further senders may push it over the RFC 7208 limit of 10, "
-                "causing PermError and SPF evaluation failure."
+                f"Approximately {a.lookup_count} DNS lookups required. "
+                "Adding any further sender will exceed the RFC 7208 limit."
             ),
-            recommended_action="Audit and flatten SPF includes before adding new senders.",
-            evidence={"record": record, "lookup_count": a.lookup_count},
+            recommended_action="Audit and flatten SPF includes before onboarding new senders.",
+            evidence={
+                "record":       record,
+                "lookup_count": a.lookup_count,
+                "impact": (
+                    "One additional sender will silently break SPF evaluation for the entire domain."
+                ),
+            },
         ))
 
-    # Providers
-    rl = record.lower()
     a.includes = re.findall(r'include:(\S+)', record, re.IGNORECASE)
-    for pattern, provider in SPF_PROVIDER_MAP.items():
-        if pattern in rl and provider not in a.providers:
-            a.providers.append(provider)
-
+    _extract_spf_providers(a, record)
     return a
 
 
-# ── DMARC analysis ────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Phase 3 — DMARC analysis
+# ---------------------------------------------------------------------------
 
 def _analyze_dmarc(domain: str, dmarc_records: List[str]) -> _DmarcAnalysis:
     a = _DmarcAnalysis()
     valid = [r for r in dmarc_records if r.lower().startswith("v=dmarc1")]
 
     if not valid:
-        a.exposure += EXPOSURE["dmarc_missing"]
+        a.score = DMARC_SCORE["missing"]
         a.findings.append(Finding(
             id=f"auth-dmarc-missing-{domain}",
             category="authentication",
             severity="critical",
             title="No DMARC record found",
             description=(
-                f"{domain} has no DMARC record. Even if SPF and DKIM pass, there is no policy "
-                "instructing receiving servers what to do with mail that fails authentication. "
-                "Without DMARC, the visible From: header used in phishing is unprotected — "
-                "SPF and DKIM alone do not guard against header spoofing."
+                f"{domain} has no DMARC record at _dmarc.{domain}. The visible From: "
+                "header used in phishing is completely unprotected regardless of SPF/DKIM."
             ),
             recommended_action=(
-                "Publish a DMARC record at _dmarc." + domain + ". "
-                "Start with p=none to collect reporting data, then advance to p=quarantine and p=reject."
+                f"Publish a DMARC record at _dmarc.{domain}. Start with p=none, "
+                "collect aggregate reports, then advance to p=quarantine and p=reject."
             ),
-            evidence={"domain": domain},
+            evidence={
+                "domain": domain,
+                "impact": (
+                    "Header spoofing attacks impersonating this domain are undetected "
+                    "and unblocked. SPF and DKIM alone do not protect the From: header."
+                ),
+            },
         ))
         return a
 
     if len(valid) > 1:
-        a.present = True
-        a.record = valid[0]
+        a.present  = True
+        a.record   = valid[0]
         a.multiple = True
-        a.exposure += EXPOSURE["dmarc_multiple"]
+        a.score    = DMARC_SCORE["multiple"]
         a.findings.append(Finding(
             id=f"auth-dmarc-multiple-{domain}",
             category="authentication",
             severity="critical",
             title=f"Multiple DMARC records found ({len(valid)})",
             description=(
-                f"{domain} has {len(valid)} DMARC TXT records at _dmarc.{domain}. "
-                "RFC 7489 requires exactly one. When multiple records are present, DMARC "
-                "evaluation is undefined and receivers may ignore the policy entirely."
+                f"{domain} has {len(valid)} DMARC records. RFC 7489 §6.6.3 requires exactly "
+                "one. Multiple records cause undefined behaviour — receivers may apply no policy."
             ),
-            recommended_action="Remove all but one DMARC record.",
-            evidence={"records": valid},
+            recommended_action="Delete all but one DMARC record.",
+            evidence={
+                "records": valid,
+                "impact": (
+                    "DMARC evaluation is undefined. Receiving servers may apply no policy, "
+                    "negating all DMARC protection."
+                ),
+            },
         ))
         return a
 
     a.present = True
-    record = valid[0]
-    a.record = record
+    record    = valid[0]
+    a.record  = record
 
-    # Policy
     pm = re.search(r'\bp=(\w+)', record, re.IGNORECASE)
     a.policy = pm.group(1).lower() if pm else "none"
 
+    pct_m = re.search(r'\bpct=(\d+)', record, re.IGNORECASE)
+    a.pct = int(pct_m.group(1)) if pct_m else 100
+
+    if a.policy == "reject":
+        a.score = DMARC_SCORE["reject_full"] if a.pct == 100 else DMARC_SCORE["reject_partial"]
+    elif a.policy == "quarantine":
+        a.score = DMARC_SCORE["quarantine_full"] if a.pct == 100 else DMARC_SCORE["quarantine_partial"]
+    else:
+        a.score = DMARC_SCORE["none"]
+
     if a.policy == "none":
-        a.exposure += EXPOSURE["dmarc_none"]
         a.findings.append(Finding(
             id=f"auth-dmarc-none-{domain}",
             category="authentication",
             severity="medium",
-            title="DMARC policy is p=none (monitoring mode) — no enforcement",
+            title="DMARC policy is p=none — monitoring mode only, no enforcement",
             description=(
-                f"The DMARC policy for {domain} is set to p=none. Mail that fails DMARC is "
-                "delivered as normal — the policy has no effect on mail flow. "
-                "Attackers can spoof this domain and recipients will receive the messages. "
-                "p=none is appropriate only as a temporary phase while collecting reporting data."
+                f"The DMARC policy for {domain} is p=none. Mail that fails authentication "
+                "is delivered normally — the policy has no effect on mail flow."
             ),
             recommended_action=(
-                "Review aggregate DMARC reports (rua=) to identify all legitimate sending sources, "
-                "then advance to p=quarantine and ultimately p=reject."
+                "Review aggregate DMARC reports, then advance to p=quarantine and p=reject."
             ),
-            evidence={"record": record},
+            evidence={
+                "record": record,
+                "impact": (
+                    "Spoofed mail passes to recipients' inboxes unchallenged. "
+                    "Domain impersonation in phishing campaigns is not blocked."
+                ),
+            },
         ))
     elif a.policy == "quarantine":
-        a.exposure += EXPOSURE["dmarc_quarantine"]
         a.findings.append(Finding(
             id=f"auth-dmarc-quarantine-{domain}",
             category="authentication",
             severity="low",
             title="DMARC policy is p=quarantine — consider upgrading to p=reject",
             description=(
-                f"The DMARC policy for {domain} sends failing mail to spam/junk folders. "
-                "This is a meaningful control, but spoofed mail still reaches recipients' mailboxes "
-                "(in the spam folder). p=reject is the strongest enforcement level and ensures "
-                "unauthenticated mail is dropped entirely."
+                f"The DMARC policy for {domain} sends failing mail to spam. "
+                "Spoofed messages still reach recipients in their spam folder."
             ),
-            recommended_action=(
-                "After confirming all legitimate senders pass DMARC, upgrade to p=reject "
-                "for full protection against domain spoofing."
-            ),
-            evidence={"record": record},
+            recommended_action="After confirming all senders pass DMARC, upgrade to p=reject.",
+            evidence={
+                "record": record,
+                "impact": (
+                    "Spoofed mail reaches recipients in spam. "
+                    "Users who check spam remain exposed to phishing content."
+                ),
+            },
         ))
 
-    # Subdomain policy
     sp = re.search(r'\bsp=(\w+)', record, re.IGNORECASE)
     a.subdomain_policy = sp.group(1).lower() if sp else a.policy
     policy_rank = {"reject": 3, "quarantine": 2, "none": 1}
@@ -530,36 +757,42 @@ def _analyze_dmarc(domain: str, dmarc_records: List[str]) -> _DmarcAnalysis:
             severity="medium",
             title=f"Subdomain DMARC policy (sp={a.subdomain_policy}) is weaker than main policy (p={a.policy})",
             description=(
-                f"The main DMARC policy for {domain} is p={a.policy}, but subdomains are only "
-                f"protected by sp={a.subdomain_policy}. Attackers can spoof subdomains of {domain} "
-                "more easily than the apex domain, often to bypass email security filters that "
-                "focus on exact domain matches."
+                f"The main policy is p={a.policy} but subdomains are governed by sp={a.subdomain_policy}. "
+                "Subdomains are frequently targeted in phishing because they are overlooked."
             ),
             recommended_action=f"Set sp={a.policy} to apply the same enforcement to all subdomains.",
-            evidence={"record": record, "p": a.policy, "sp": a.subdomain_policy},
+            evidence={
+                "record": record,
+                "p":  a.policy,
+                "sp": a.subdomain_policy,
+                "impact": (
+                    f"Subdomains of {domain} have weaker protection than the apex domain "
+                    "and are easier targets for impersonation."
+                ),
+            },
         ))
 
-    # pct
-    pct_m = re.search(r'\bpct=(\d+)', record, re.IGNORECASE)
-    a.pct = int(pct_m.group(1)) if pct_m else 100
     if a.pct < 100 and a.policy != "none":
-        a.exposure += EXPOSURE["dmarc_pct_partial"]
         a.findings.append(Finding(
             id=f"auth-dmarc-pct-partial-{domain}",
             category="authentication",
             severity="medium",
             title=f"DMARC pct={a.pct} — policy applies to only {a.pct}% of failing mail",
             description=(
-                f"The pct tag limits DMARC enforcement to {a.pct}% of mail that fails authentication. "
-                f"The remaining {100 - a.pct}% is treated as if the policy were one level lower "
-                "(quarantine → none, reject → quarantine). Attackers can still successfully "
-                "deliver spoofed mail in the unenforced percentage."
+                f"The pct tag limits enforcement to {a.pct}% of failing mail. "
+                f"The remaining {100 - a.pct}% is treated one policy level lower."
             ),
-            recommended_action="Set pct=100 once all legitimate senders are confirmed to pass DMARC.",
-            evidence={"record": record, "pct": a.pct},
+            recommended_action="Set pct=100 for full enforcement.",
+            evidence={
+                "record": record,
+                "pct":    a.pct,
+                "impact": (
+                    f"{100 - a.pct}% of spoofed or failing mail bypasses the declared policy. "
+                    "The effective protection level is lower than the p= tag implies."
+                ),
+            },
         ))
 
-    # Reporting
     rua_m = re.search(r'\brua=([^\s;]+)', record, re.IGNORECASE)
     ruf_m = re.search(r'\bruf=([^\s;]+)', record, re.IGNORECASE)
     a.rua = [x.strip() for x in rua_m.group(1).split(",")] if rua_m else []
@@ -570,20 +803,23 @@ def _analyze_dmarc(domain: str, dmarc_records: List[str]) -> _DmarcAnalysis:
             id=f"auth-dmarc-no-reporting-{domain}",
             category="authentication",
             severity="low",
-            title="No DMARC aggregate reporting address configured (rua= missing)",
+            title="No DMARC aggregate reporting address (rua=) configured",
             description=(
                 f"The DMARC record for {domain} has no rua= tag. Without aggregate reports, "
-                "you have no visibility into which sources are sending mail as your domain — "
-                "including illegitimate senders. Aggregate reports are essential for advancing "
-                "toward full p=reject enforcement safely."
+                "you have no visibility into authentication failures or spoofing activity."
             ),
             recommended_action=(
-                "Add rua=mailto:dmarc-reports@" + domain + " or use a third-party DMARC reporting service."
+                f"Add rua=mailto:dmarc@{domain} or use a third-party DMARC reporting service."
             ),
-            evidence={"record": record},
+            evidence={
+                "record": record,
+                "impact": (
+                    "No data on authentication failures is collected. "
+                    "Safe advancement toward p=reject is impossible without reporting data."
+                ),
+            },
         ))
 
-    # Alignment
     aspf_m  = re.search(r'\baspf=([rs])',  record, re.IGNORECASE)
     adkim_m = re.search(r'\badkim=([rs])', record, re.IGNORECASE)
     a.aspf  = aspf_m.group(1).lower()  if aspf_m  else "r"
@@ -592,70 +828,107 @@ def _analyze_dmarc(domain: str, dmarc_records: List[str]) -> _DmarcAnalysis:
     return a
 
 
-# ── DKIM analysis ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Phase 4 — DKIM analysis (provider-aware)
+# ---------------------------------------------------------------------------
 
-async def _analyze_dkim(domain: str) -> _DkimAnalysis:
+async def _analyze_dkim(
+    domain: str,
+    spf_providers: List[str],
+    mx_providers: List[str],
+) -> _DkimAnalysis:
+    """Provider-aware DKIM selector discovery."""
     a = _DkimAnalysis()
-    tasks = [_resolve_dkim(sel, domain) for sel in DKIM_SELECTORS]
-    resolved = await asyncio.gather(*tasks)
-    a.selectors = [s for s in resolved if s.get("valid")]
+    all_detected  = list(dict.fromkeys(spf_providers + mx_providers))
+    selector_list = _build_selector_list(all_detected)
+    a.selectors_checked = selector_list
+
+    tasks   = [_resolve_dkim(sel, domain) for sel in selector_list]
+    results = await asyncio.gather(*tasks)
+    a.selectors = [r for r in results if r.get("valid")]
 
     if not a.selectors:
-        a.exposure += EXPOSURE["dkim_missing"]
+        a.score = DKIM_SCORE["missing"]
         a.findings.append(Finding(
             id=f"auth-dkim-missing-{domain}",
             category="authentication",
             severity="medium",
-            title="No DKIM selectors found",
+            title="DKIM signing not detected for this domain",
             description=(
                 f"No DKIM public key records were found for {domain} after checking "
-                f"{len(DKIM_SELECTORS)} common selector names. Without DKIM, outbound mail "
-                "cannot be cryptographically signed — DMARC alignment via DKIM is impossible, "
-                "and mail is more susceptible to in-transit modification and replay attacks."
+                f"{len(selector_list)} selectors (including provider-specific selectors for: "
+                f"{', '.join(all_detected) if all_detected else 'no detected providers'}). "
+                "Without DKIM, outbound mail cannot be cryptographically signed."
             ),
             recommended_action=(
-                "Enable DKIM signing in your mail platform and publish the public key as a TXT record. "
-                "If a non-standard selector is in use, verify it manually."
+                "Enable DKIM signing in your mail platform and publish the public key at "
+                f"<selector>._domainkey.{domain}. If a non-standard selector is in use, "
+                "verify it manually."
             ),
-            evidence={"selectors_checked": DKIM_SELECTORS},
+            evidence={
+                "selectors_checked": selector_list,
+                "providers_checked": all_detected,
+                "impact": (
+                    "DMARC alignment can only be achieved via SPF. Forwarded mail will "
+                    "fail DMARC because SPF breaks on forwarding. DKIM provides a "
+                    "resilient second alignment path that survives forwarding."
+                ),
+            },
         ))
         return a
 
-    # Key strength findings
+    worst_tier = "present"
+
     for s in a.selectors:
         bits = s.get("key_bits")
         if bits is not None and bits < 1024:
-            a.exposure += EXPOSURE["dkim_weak_key"]
+            worst_tier = "weak_key"
             a.findings.append(Finding(
                 id=f"auth-dkim-weak-key-{s['selector']}",
                 category="authentication",
                 severity="critical",
-                title=f"DKIM selector '{s['selector']}' uses a weak key (~{bits} bits)",
+                title=f"DKIM selector '{s['selector']}' uses a cryptographically weak key (~{bits} bits)",
                 description=(
-                    f"The DKIM key for selector '{s['selector']}' on {domain} is approximately "
-                    f"{bits} bits, which is below the 1024-bit minimum required by RFC 6376. "
-                    "Keys under 1024 bits can be factored, allowing attackers to forge DKIM signatures."
+                    f"The DKIM key for '{s['selector']}' on {domain} is ~{bits} bits. "
+                    "RFC 6376 §3.3.3 requires minimum 1024 bits. Sub-1024 keys can be factored."
                 ),
-                recommended_action="Rotate to a 2048-bit RSA key immediately.",
-                evidence={"selector": s["selector"], "fqdn": s["fqdn"], "key_bits": bits},
+                recommended_action=f"Rotate selector '{s['selector']}' to a 2048-bit RSA key immediately.",
+                evidence={
+                    "selector": s["selector"],
+                    "fqdn":     s["fqdn"],
+                    "key_bits": bits,
+                    "impact": (
+                        "An attacker who factors the private key can forge valid DKIM "
+                        "signatures for any mail from this domain."
+                    ),
+                },
             ))
         elif bits is not None and bits < 2048:
-            a.exposure += EXPOSURE["dkim_short_key"]
+            if worst_tier == "present":
+                worst_tier = "short_key"
             a.findings.append(Finding(
                 id=f"auth-dkim-short-key-{s['selector']}",
                 category="authentication",
                 severity="low",
                 title=f"DKIM selector '{s['selector']}' uses a 1024-bit key — 2048 bits recommended",
                 description=(
-                    f"The DKIM key for selector '{s['selector']}' on {domain} is approximately "
-                    f"{bits} bits. While 1024 bits is the current minimum, NIST recommends "
-                    "migrating to 2048-bit keys as 1024-bit RSA is approaching practical vulnerability."
+                    f"The DKIM key for '{s['selector']}' on {domain} is ~{bits} bits. "
+                    "NIST SP 800-131A recommends migrating to 2048-bit RSA."
                 ),
-                recommended_action="Plan rotation to a 2048-bit RSA key at next key rotation cycle.",
-                evidence={"selector": s["selector"], "fqdn": s["fqdn"], "key_bits": bits},
+                recommended_action="Plan a key rotation to 2048-bit RSA at the next scheduled cycle.",
+                evidence={
+                    "selector": s["selector"],
+                    "fqdn":     s["fqdn"],
+                    "key_bits": bits,
+                    "impact": (
+                        "1024-bit RSA is approaching practical factorability. "
+                        "Proactive rotation reduces long-term key compromise risk."
+                    ),
+                },
             ))
 
-    # Providers from selectors
+    a.score = DKIM_SCORE[worst_tier]
+
     for s in a.selectors:
         p = s.get("platform")
         if p and p not in a.providers:
@@ -664,101 +937,232 @@ async def _analyze_dkim(domain: str) -> _DkimAnalysis:
     return a
 
 
-# ── Cross-protocol analysis ───────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# MX provider classification
+# ---------------------------------------------------------------------------
 
-def _cross_analysis(
+def _classify_mx_providers(mx_hosts: List[str]) -> List[str]:
+    providers: List[str] = []
+    for host in mx_hosts:
+        h = host.lower().rstrip(".")
+        for pattern, provider in MX_PROVIDER_MAP.items():
+            if h.endswith(pattern) and provider not in providers:
+                providers.append(provider)
+                break
+    return providers
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — Cross-protocol analysis
+# ---------------------------------------------------------------------------
+
+async def _cross_analysis(
     domain: str,
     spf: _SpfAnalysis,
     dmarc: _DmarcAnalysis,
     dkim: _DkimAnalysis,
+    mx: _MxAnalysis,
 ) -> Tuple[List[Finding], int]:
     findings: List[Finding] = []
-    extra_exposure = 0
 
-    # Authentication gap: DMARC present, but nothing to align against
-    if dmarc.present and not spf.present and not dkim.selectors:
-        extra_exposure += EXPOSURE["cross_auth_gap"]
+    has_spf        = spf.present and not spf.multiple
+    has_dkim       = bool(dkim.selectors)
+    has_dmarc      = dmarc.present and not dmarc.multiple
+    dmarc_enforced = has_dmarc and dmarc.policy in ("quarantine", "reject")
+
+    # Authentication gap
+    if has_dmarc and not has_spf and not has_dkim:
         findings.append(Finding(
             id=f"auth-cross-gap-{domain}",
             category="authentication",
             severity="critical",
-            title="Authentication gap: DMARC exists but neither SPF nor DKIM is configured",
+            title="Authentication gap: DMARC present but neither SPF nor DKIM configured",
             description=(
-                f"{domain} has a DMARC record but no SPF record and no DKIM selectors. "
-                "DMARC requires at least one of SPF or DKIM to pass and align — with neither "
-                "configured, all mail from this domain will fail DMARC regardless of source. "
-                "Legitimate mail may be rejected; the DMARC policy provides no practical protection."
+                f"{domain} has DMARC but no SPF and no DKIM. DMARC requires at least one "
+                "of SPF or DKIM to align. With neither, all mail fails DMARC — legitimate "
+                "mail may be rejected while spoofed mail is equally affected."
             ),
-            recommended_action=(
-                "Configure SPF and enable DKIM signing before relying on DMARC enforcement."
-            ),
-            evidence={"domain": domain},
+            recommended_action="Configure SPF and enable DKIM signing before enforcing DMARC.",
+            evidence={
+                "domain": domain,
+                "impact": (
+                    "The DMARC record is non-functional. No alignment path is available — "
+                    "the policy provides no protective or discriminating value."
+                ),
+            },
         ))
 
-    # SPF only — no DMARC
-    if spf.present and not dmarc.present:
+    # SPF-only alignment dependency (new in v2.1)
+    if dmarc_enforced and has_spf and not has_dkim:
+        findings.append(Finding(
+            id=f"auth-cross-spf-only-alignment-{domain}",
+            category="authentication",
+            severity="medium",
+            title=(
+                f"DMARC enforcement relies solely on SPF alignment "
+                f"(p={dmarc.policy}, DKIM not configured)"
+            ),
+            description=(
+                f"DMARC for {domain} is enforcing (p={dmarc.policy}) but DKIM is absent. "
+                "The only alignment path is SPF. SPF alignment breaks on mail forwarding "
+                "because the envelope sender is rewritten to the forwarder's domain — "
+                "legitimate forwarded mail will fail DMARC and be "
+                f"{'rejected' if dmarc.policy == 'reject' else 'quarantined'}."
+            ),
+            recommended_action=(
+                "Enable DKIM signing. DKIM signatures survive forwarding because they are "
+                "carried in message headers, not the envelope. DKIM provides a resilient "
+                "second alignment path."
+            ),
+            evidence={
+                "dmarc_policy": dmarc.policy,
+                "impact": (
+                    "Forwarded mail from legitimate sources — mailing lists, auto-forwards, "
+                    "compliance BCC archives — will fail DMARC and be blocked or quarantined."
+                ),
+            },
+        ))
+
+    # SPF with no DMARC
+    if has_spf and not has_dmarc:
         findings.append(Finding(
             id=f"auth-cross-no-dmarc-spf-{domain}",
             category="authentication",
             severity="medium",
-            title="SPF configured but no DMARC — From: header spoofing is unprotected",
+            title="SPF configured but no DMARC — visible From: header is unprotected",
             description=(
-                f"{domain} has an SPF record but no DMARC policy. SPF protects the envelope "
-                "sender (Return-Path), not the visible From: header that users see in their "
-                "mail client. Phishing attacks using display-name or header spoofing will "
-                "pass SPF and reach recipients without a DMARC policy to block them."
+                f"{domain} has SPF but no DMARC. SPF validates the envelope sender, "
+                "not the visible From: header. Phishing attacks spoof the From: header — "
+                "SPF does not prevent this."
             ),
-            recommended_action=(
-                "Publish a DMARC record at _dmarc." + domain + " starting with p=none "
-                "to collect data, then advance to enforcement."
-            ),
-            evidence={"domain": domain},
+            recommended_action=f"Publish a DMARC record at _dmarc.{domain} starting with p=none.",
+            evidence={
+                "domain": domain,
+                "impact": (
+                    "Header spoofing attacks impersonating this domain pass SPF "
+                    "and are delivered to recipients without challenge."
+                ),
+            },
         ))
 
-    # DKIM only — no DMARC
-    if dkim.selectors and not dmarc.present:
+    # DKIM with no DMARC
+    if has_dkim and not has_dmarc:
         findings.append(Finding(
             id=f"auth-cross-no-dmarc-dkim-{domain}",
             category="authentication",
             severity="medium",
             title="DKIM configured but no DMARC — domain spoofing is unprotected",
             description=(
-                f"{domain} has DKIM selectors but no DMARC policy. DKIM proves message integrity "
-                "but does not require alignment between the signing domain and the visible From: "
-                "header. Without DMARC, spoofed mail can pass DKIM if signed by any domain "
-                "and will not be acted upon by receiving servers."
+                f"{domain} has DKIM selectors but no DMARC. Without DMARC, there is no "
+                "policy enforcing alignment between DKIM signing domain and the From: header."
             ),
-            recommended_action=(
-                "Publish a DMARC record at _dmarc." + domain + " to enforce DKIM alignment."
-            ),
-            evidence={"domain": domain},
+            recommended_action=f"Publish a DMARC record at _dmarc.{domain}.",
+            evidence={
+                "domain": domain,
+                "impact": (
+                    "Spoofed mail signed by any domain passes DKIM. Without DMARC alignment "
+                    "enforcement, DKIM alone does not protect the From: header."
+                ),
+            },
         ))
 
     # Weak enforcement triangle
-    weak_spf = spf.present and spf.policy in ("~all", "?all", "+all", "missing")
-    no_enforcement = not dmarc.present or dmarc.policy == "none"
-    if weak_spf and no_enforcement and not dkim.selectors:
+    weak_spf = has_spf and spf.policy in ("~all", "?all", "+all", "missing")
+    if weak_spf and not dmarc_enforced and not has_dkim:
         findings.append(Finding(
             id=f"auth-cross-weak-triangle-{domain}",
             category="authentication",
             severity="medium",
-            title="Weak authentication posture: soft SPF, no DKIM, no DMARC enforcement",
+            title="Authentication posture: soft SPF, no DKIM, no DMARC enforcement",
             description=(
-                f"{domain} has a non-enforcing SPF policy, no DKIM deployment, and no DMARC "
-                "enforcement. This combination provides a minimal barrier against spoofing — "
-                "a motivated attacker can impersonate this domain and deliver mail to recipients "
-                "with no authentication mechanism blocking delivery."
+                f"{domain} has a non-enforcing SPF policy ({spf.policy}), no DKIM, and "
+                "no DMARC enforcement. This combination provides a minimal barrier against spoofing."
             ),
             recommended_action=(
-                "Upgrade SPF to -all, enable DKIM signing, and deploy DMARC with at least p=quarantine."
+                "Priority: (1) deploy DMARC p=quarantine/reject, "
+                "(2) harden SPF to -all, (3) enable DKIM signing."
             ),
-            evidence={"domain": domain, "spf_policy": spf.policy},
+            evidence={
+                "spf_policy": spf.policy,
+                "impact": (
+                    "All three authentication layers are weak simultaneously. "
+                    "Domain impersonation attacks face no meaningful technical barrier."
+                ),
+            },
         ))
 
-    # Provider mismatch between SPF and DKIM
-    spf_set  = set(spf.providers)
-    dkim_set = set(dkim.providers)
-    if spf_set and dkim_set:
+    # External DMARC reporting authorisation (RFC 7489 §7.1)
+    all_reporting = dmarc.rua + dmarc.ruf
+    if all_reporting:
+        unauthorised = await _check_dmarc_external_reporting_auth(domain, all_reporting)
+        if unauthorised:
+            for ext in unauthorised:
+                findings.append(Finding(
+                    id=f"auth-dmarc-ext-reporting-{domain}",
+                    category="authentication",
+                    severity="info",
+                    title=f"External DMARC reporting destination may not be authorised: {ext}",
+                    description=(
+                        f"The DMARC record for {domain} sends reports to {ext}. "
+                        f"RFC 7489 §7.1 requires {ext} to publish "
+                        f"{domain}._report._dmarc.{ext} TXT 'v=DMARC1;' — this record was not found."
+                    ),
+                    recommended_action=(
+                        f"Ask the operator of {ext} to publish: "
+                        f"{domain}._report._dmarc.{ext} TXT \"v=DMARC1;\""
+                    ),
+                    evidence={
+                        "reporting_domain": ext,
+                        "required_record":  f"{domain}._report._dmarc.{ext}",
+                        "impact": (
+                            "Some receivers will not deliver aggregate reports to an "
+                            "unauthorised external domain. You may receive incomplete DMARC data."
+                        ),
+                    },
+                ))
+
+    # Platform consistency (new in v2.1)
+    if has_spf and spf.providers:
+        all_other = set(dkim.providers) | set(mx.providers)
+        spf_only  = [
+            p for p in spf.providers
+            if p not in all_other and p in PROVIDER_PRIORITY_SELECTORS
+        ]
+        if spf_only:
+            findings.append(Finding(
+                id=f"auth-cross-platform-consistency-{domain}",
+                category="authentication",
+                severity="low",
+                title=(
+                    "SPF authorises platform(s) with no corroborating DKIM or MX signal: "
+                    + ", ".join(spf_only)
+                ),
+                description=(
+                    f"The SPF record for {domain} authorises "
+                    f"{', '.join(spf_only)}, but no DKIM selectors or MX records for "
+                    f"{'this platform were' if len(spf_only) == 1 else 'these platforms were'} "
+                    "detected. This may indicate an orphaned SPF entry from a past platform migration."
+                ),
+                recommended_action=(
+                    f"Verify whether mail is still actively sent through {', '.join(spf_only)}. "
+                    "If not, remove the corresponding include: from the SPF record."
+                ),
+                evidence={
+                    "spf_only_providers": spf_only,
+                    "spf_providers":      spf.providers,
+                    "dkim_providers":     dkim.providers,
+                    "mx_providers":       mx.providers,
+                    "impact": (
+                        "An orphaned SPF authorisation allows decommissioned platform IP "
+                        "ranges to pass SPF for this domain indefinitely."
+                    ),
+                },
+            ))
+
+    # Provider mismatch: SPF vs DKIM
+    if spf.providers and dkim.providers:
+        spf_set  = set(spf.providers)
+        dkim_set = set(dkim.providers)
         only_spf  = spf_set  - dkim_set
         only_dkim = dkim_set - spf_set
         if only_spf and only_dkim:
@@ -768,34 +1172,56 @@ def _cross_analysis(
                 severity="low",
                 title="Sending infrastructure mismatch between SPF and DKIM",
                 description=(
-                    f"SPF authorises {', '.join(sorted(only_spf))} but DKIM keys are published "
-                    f"for {', '.join(sorted(only_dkim))}. This may indicate a platform migration "
-                    "in progress, an orphaned configuration, or an unrecognised sending service. "
-                    "Mail from a provider in only one list may fail DMARC alignment."
+                    f"SPF authorises {', '.join(sorted(only_spf))} but DKIM keys are "
+                    f"published for {', '.join(sorted(only_dkim))}."
                 ),
                 recommended_action=(
-                    "Audit all authorised sending sources. Ensure every mail platform is listed "
-                    "in both SPF and has DKIM selectors published."
+                    "Audit all sending platforms. Ensure each is present in both SPF and DKIM."
                 ),
                 evidence={
                     "spf_providers":  list(spf_set),
                     "dkim_providers": list(dkim_set),
                     "only_in_spf":    list(only_spf),
                     "only_in_dkim":   list(only_dkim),
+                    "impact": (
+                        "SPF-only providers lose DMARC alignment on forwarded mail. "
+                        "DKIM-only providers may not be SPF-authorised."
+                    ),
                 },
             ))
 
-    return findings, extra_exposure
+    # Cross-protocol score
+    if has_spf and has_dkim and dmarc_enforced:
+        cross_score = CROSS_SCORE["all_three_enforcing"]
+    elif has_spf and dmarc_enforced and not has_dkim:
+        cross_score = CROSS_SCORE["spf_dmarc_only"]
+    elif has_dkim and dmarc_enforced and not has_spf:
+        cross_score = CROSS_SCORE["dmarc_dkim_only"]
+    elif (has_spf or has_dkim) and not has_dmarc:
+        cross_score = CROSS_SCORE["spf_dkim_no_dmarc"]
+    elif has_dmarc and not has_spf and not has_dkim:
+        cross_score = CROSS_SCORE["dmarc_no_spf_dkim"]
+    else:
+        cross_score = CROSS_SCORE["nothing_enforcing"]
+
+    return findings, cross_score
 
 
-# ── Main analyzer class ───────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Main analyzer class
+# ---------------------------------------------------------------------------
 
 class AuthHealthAnalyzer:
     """
-    V2 authentication health analyzer.
-    Interface matches all other V2 scan modules:
+    MailGuard V2 Authentication Health analyzer (v2.1).
+
+    Interface contract (matches all V2 scan modules):
       __init__(domain: str)
       async run(request: ScanRequest) -> ScanResult
+
+    Scoring: SPF(30) + DMARC(35) + DKIM(25) + Cross-protocol(10) = 100 max
+    ScanResult.score    = exposure  (higher = worse posture, V2 convention)
+    evidence.health_score = 100 - exposure  (higher = healthier)
     """
 
     def __init__(self, domain: str):
@@ -806,28 +1232,37 @@ class AuthHealthAnalyzer:
         scan_id    = str(uuid.uuid4())
         scan_start = time.monotonic()
 
-        # ── Phase 1: DNS collection (concurrent) ─────────────────────────────
-        txt_records, dmarc_records, dkim = await asyncio.gather(
+        # Phase 1: Concurrent DNS collection (TXT + DMARC + MX simultaneously)
+        txt_records, dmarc_records, mx_hosts = await asyncio.gather(
             _resolve_txt(domain),
             _resolve_txt(f"_dmarc.{domain}"),
-            _analyze_dkim(domain),
+            _resolve_mx_hosts(domain),
         )
 
-        # ── Phase 2–4: Per-protocol analysis ─────────────────────────────────
-        spf   = _analyze_spf(domain, txt_records)
+        # Phase 2: SPF analysis
+        spf = _analyze_spf(domain, txt_records)
+
+        # Phase 3b: MX provider detection (used for provider-aware DKIM ordering)
+        mx = _MxAnalysis(
+            hosts=mx_hosts,
+            providers=_classify_mx_providers(mx_hosts),
+        )
+
+        # Phase 4: Provider-aware DKIM discovery
+        dkim = await _analyze_dkim(domain, spf.providers, mx.providers)
+
+        # Phase 3: DMARC analysis
         dmarc = _analyze_dmarc(domain, dmarc_records)
 
-        # ── Phase 5: Cross-protocol ───────────────────────────────────────────
-        cross_findings, cross_exposure = _cross_analysis(domain, spf, dmarc, dkim)
-
-        # ── Phase 6: Aggregate findings and score ─────────────────────────────
-        total_exposure = min(
-            100,
-            spf.exposure + dmarc.exposure + dkim.exposure + cross_exposure
+        # Phase 5: Cross-protocol analysis
+        cross_findings, cross_score = await _cross_analysis(
+            domain, spf, dmarc, dkim, mx
         )
-        health_score = max(0, 100 - total_exposure)
 
-        # Grade based on health score
+        # Phase 6: Score calculation
+        health_score = min(100, spf.score + dmarc.score + dkim.score + cross_score)
+        exposure     = max(0, 100 - health_score)
+
         grade = (
             "A" if health_score >= 90 else
             "B" if health_score >= 75 else
@@ -835,43 +1270,39 @@ class AuthHealthAnalyzer:
             "D" if health_score >= 45 else "F"
         )
 
-        # All providers (union of SPF + DKIM)
+        # Union of all detected providers
         all_providers: List[str] = []
-        for p in spf.providers + dkim.providers:
+        for p in spf.providers + dkim.providers + mx.providers:
             if p not in all_providers:
                 all_providers.append(p)
 
-        # Ordered findings: cross first (most actionable), then by protocol
-        all_findings = (
-            cross_findings
-            + spf.findings
-            + dmarc.findings
-            + dkim.findings
-        )
+        # Aggregate findings (cross-protocol first — most actionable)
+        all_findings = cross_findings + spf.findings + dmarc.findings + dkim.findings
 
-        # Lead summary finding
         critical_count = sum(1 for f in all_findings if f.severity == "critical")
         high_count     = sum(1 for f in all_findings if f.severity == "high")
         summary_sev    = "critical" if critical_count else "medium" if high_count else "info"
 
-        summary_finding = Finding(
+        summary = Finding(
             id=f"auth-summary-{domain}",
             category="authentication",
             severity=summary_sev,
             title=f"Authentication Health: {domain} — Score {health_score}/100 (Grade {grade})",
             description=(
                 f"Authentication posture for {domain}: "
-                f"SPF {'✓' if spf.present else '✗'} | "
+                f"SPF {'✓' if spf.present else '✗'} ({spf.policy or 'absent'}) | "
                 f"DMARC {'✓' if dmarc.present else '✗'} "
-                f"{'(p=' + dmarc.policy + ')' if dmarc.present else ''} | "
-                f"DKIM {'✓ (' + str(len(dkim.selectors)) + ' selector' + ('s' if len(dkim.selectors) != 1 else '') + ')' if dkim.selectors else '✗'}. "
-                + (f"{critical_count} critical issue(s) require immediate attention." if critical_count else
-                   "No critical authentication issues detected.")
+                f"({'p=' + dmarc.policy if dmarc.present else 'absent'}) | "
+                f"DKIM {'✓ (' + str(len(dkim.selectors)) + ' selector' + ('s' if len(dkim.selectors) != 1 else '') + ' found)' if dkim.selectors else '✗ (not detected)'}. "
+                + (
+                    f"{critical_count} critical issue(s) require immediate attention."
+                    if critical_count else
+                    "No critical authentication issues detected."
+                )
             ),
             recommended_action=(
-                "Review the findings below in severity order. "
-                "Prioritise deploying DMARC p=reject as the primary goal — "
-                "SPF and DKIM are prerequisites."
+                "Address findings in severity order. Highest-value improvements: "
+                "(1) deploy DMARC p=reject, (2) enable DKIM signing, (3) harden SPF to -all."
             ),
             evidence={
                 "domain":             domain,
@@ -883,10 +1314,8 @@ class AuthHealthAnalyzer:
                 "detected_providers": all_providers,
             },
         )
+        all_findings.insert(0, summary)
 
-        all_findings.insert(0, summary_finding)
-
-        # ── Scan metadata ─────────────────────────────────────────────────────
         scan_duration_ms = round((time.monotonic() - scan_start) * 1000)
 
         return ScanResult(
@@ -894,52 +1323,60 @@ class AuthHealthAnalyzer:
             tenant_id=domain,
             family="authentication",
             findings=all_findings,
-            score=total_exposure,   # V2 convention: higher = more exposed
+            score=exposure,
             status="complete",
             timestamp=datetime.now(timezone.utc).isoformat(),
             evidence={
-                "domain":             domain,
-                "health_score":       health_score,
-                "grade":              grade,
+                "domain":       domain,
+                "health_score": health_score,
+                "grade":        grade,
                 "spf": {
-                    "present":         spf.present,
-                    "record":          spf.record,
-                    "policy":          spf.policy,
-                    "multiple":        spf.multiple,
-                    "lookup_count":    spf.lookup_count,
-                    "includes":        spf.includes,
-                    "providers":       spf.providers,
+                    "present":       spf.present,
+                    "record":        spf.record,
+                    "policy":        spf.policy,
+                    "multiple":      spf.multiple,
+                    "lookup_count":  spf.lookup_count,
+                    "includes":      spf.includes,
+                    "providers":     spf.providers,
+                    "score":         spf.score,
                 },
                 "dmarc": {
-                    "present":         dmarc.present,
-                    "record":          dmarc.record,
-                    "policy":          dmarc.policy,
-                    "subdomain_policy": dmarc.subdomain_policy,
-                    "pct":             dmarc.pct,
-                    "rua":             dmarc.rua,
-                    "ruf":             dmarc.ruf,
-                    "aspf":            dmarc.aspf,
-                    "adkim":           dmarc.adkim,
-                    "multiple":        dmarc.multiple,
+                    "present":           dmarc.present,
+                    "record":            dmarc.record,
+                    "policy":            dmarc.policy,
+                    "subdomain_policy":  dmarc.subdomain_policy,
+                    "pct":               dmarc.pct,
+                    "rua":               dmarc.rua,
+                    "ruf":               dmarc.ruf,
+                    "aspf":              dmarc.aspf,
+                    "adkim":             dmarc.adkim,
+                    "multiple":          dmarc.multiple,
+                    "score":             dmarc.score,
                 },
                 "dkim": {
-                    "selectors_found":     dkim.selectors,
-                    "selectors_attempted": len(DKIM_SELECTORS),
-                    "providers":           dkim.providers,
+                    "selectors_found":    dkim.selectors,
+                    "selectors_checked":  len(dkim.selectors_checked),
+                    "providers":          dkim.providers,
+                    "score":              dkim.score,
+                },
+                "mx": {
+                    "hosts":     mx.hosts,
+                    "providers": mx.providers,
                 },
                 "detected_providers": all_providers,
                 "score_breakdown": {
-                    "spf_exposure":   spf.exposure,
-                    "dmarc_exposure": dmarc.exposure,
-                    "dkim_exposure":  dkim.exposure,
-                    "cross_exposure": cross_exposure,
-                    "total":          total_exposure,
+                    "spf":          spf.score,
+                    "dmarc":        dmarc.score,
+                    "dkim":         dkim.score,
+                    "cross":        cross_score,
+                    "health_total": health_score,
+                    "exposure":     exposure,
                 },
                 "scan_metadata": {
-                    "scan_type":        "authentication_health",
-                    "module_version":   MODULE_VERSION,
-                    "scan_duration_ms": scan_duration_ms,
-                    "selectors_checked": len(DKIM_SELECTORS),
+                    "scan_type":         "authentication_health",
+                    "module_version":    MODULE_VERSION,
+                    "scan_duration_ms":  scan_duration_ms,
+                    "selectors_checked": len(dkim.selectors_checked),
                 },
             },
         )

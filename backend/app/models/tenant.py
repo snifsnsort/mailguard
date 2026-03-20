@@ -29,6 +29,7 @@ class Tenant(Base):
     last_scan_at  = Column(DateTime, nullable=True)
 
     scans = relationship("Scan", back_populates="tenant", cascade="all, delete-orphan")
+    scan_schedule = relationship("ScanSchedule", back_populates="tenant", uselist=False, cascade="all, delete-orphan")
 
     @property
     def all_domains(self) -> list[str]:

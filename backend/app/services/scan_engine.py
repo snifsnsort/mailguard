@@ -17,6 +17,7 @@ from app.services.mx_analyzer import analyze_mx, MxAnalysis, SEG_CHECK_CONTEXT
 from app.services.lookalike_detector import generate_common_squats
 from app.services.google_workspace_checker import GoogleWorkspaceChecker, is_google_workspace_domain, GWS_CHECK_WEIGHTS
 from app.models.schemas import FindingResult, Severity
+from app.services.benchmarks import ScanContext, run_registered_benchmarks
 
 
 # ── Penalty model ─────────────────────────────────────────────────────────────
@@ -124,6 +125,14 @@ def _compute_score(findings: list, weights: dict) -> tuple[int, list]:
 
     score = round((total_earned / total_possible) * 100) if total_possible > 0 else 0
     return max(0, min(100, score)), breakdown
+
+
+def _serialize_benchmark_result(result) -> dict:
+    payload = result.dict()
+    payload["started_at"] = result.started_at.isoformat()
+    payload["completed_at"] = result.completed_at.isoformat() if result.completed_at else None
+    payload["findings"] = [finding.dict() for finding in result.findings]
+    return payload
 
 
 class ScanEngine:
@@ -1387,22 +1396,9 @@ class ScanEngine:
                 self._check_sharepoint_external_sharing(),
             ]
             await asyncio.gather(*tenant_checks, return_exceptions=True)
-
-        # ── Step 6: Score via penalty model ──────────────────────────────────
-        # For multi-domain tenants, domain-scoped checks (SPF/DKIM/DMARC etc.)
-        # fire once per domain. To keep the 0–100 scale meaningful regardless
-        # of domain count, we average each domain's domain-check penalty
-        # and add the tenant-wide penalty on top.
-        DOMAIN_CHECK_KEYS = {
-            "mx_gateway", "mx_bypass_risk", "spf_record",
-            "dkim_enabled", "dmarc_policy", "lookalike_domains",
-            "gws_mx_routing", "gws_spf_record", "gws_dkim_enabled", "gws_dmarc_policy",
-        }
-
-        n = len(domains)
-
-        # Deduplicate findings — in dual-platform mode the same check can fire
-        # twice for the same domain (e.g. lookalike runs in both M365 and GWS paths)
+        # -- Step 6: Deduplicate findings ------------------------------------
+        # In dual-platform mode the same check can fire twice for the same
+        # domain, so normalize before benchmarks and final scoring.
         seen_findings: set = set()
         deduped: List[FindingResult] = []
         for f in self.findings:
@@ -1412,20 +1408,44 @@ class ScanEngine:
                 deduped.append(f)
         self.findings = deduped
 
-        domain_findings  = [f for f in self.findings if f.domain]
-        tenant_findings  = [f for f in self.findings if not f.domain]
+        # -- Step 7: Run benchmark modules against collected evidence ---------
+        benchmark_context = ScanContext(
+            tenant_id=self.graph.tenant_id,
+            primary_domain=self.domain,
+            domains=domains,
+            platform=platform,
+            findings=self.findings,
+            evidence={
+                "mx_analyses": self._mx_analyses,
+                "has_m365": self._has_m365,
+                "has_gws": self._has_gws,
+                "is_google_workspace": self._is_google_workspace,
+            },
+        )
+        benchmark_results = await run_registered_benchmarks(benchmark_context)
+        benchmark_findings = {
+            result.benchmark_key: [finding.dict() for finding in result.findings]
+            for result in benchmark_results
+        }
 
-        # Compute per-domain scores and average them
+        # -- Step 8: Score via penalty model ----------------------------------
+        # For multi-domain tenants, domain-scoped checks (SPF/DKIM/DMARC etc.)
+        # fire once per domain. To keep the 0-100 scale meaningful regardless
+        # of domain count, we average each domain's domain-check penalty
+        # and add the tenant-wide penalty on top.
+        n = len(domains)
+        domain_findings = [f for f in self.findings if f.domain]
+        tenant_findings = [f for f in self.findings if not f.domain]
+
         domain_scores_by_domain: Dict[str, int] = {}
         for d in domains:
             df = [f for f in domain_findings if f.domain == d]
             domain_score, _ = _compute_score(df, CHECK_WEIGHTS)
             domain_scores_by_domain[d] = domain_score
 
-        avg_domain_score    = (sum(domain_scores_by_domain.values()) / n) if n else 100
+        avg_domain_score = (sum(domain_scores_by_domain.values()) / n) if n else 100
         tenant_score, tenant_breakdown = _compute_score(tenant_findings, CHECK_WEIGHTS)
 
-        # Blend domain and tenant scores weighted by their check counts
         n_domain_checks = len([k for k in CHECK_WEIGHTS if k in {
             "spf_record", "dkim_enabled", "dmarc_policy", "mx_bypass_risk",
             "mx_gateway", "lookalike_domains",
@@ -1437,20 +1457,21 @@ class ScanEngine:
             (avg_domain_score * n_domain_checks + tenant_score * n_tenant_checks) / total_checks
         ) if total_checks > 0 else tenant_score
 
-        # Build breakdown: worst domain + tenant checks
         penalty_breakdown = tenant_breakdown
         if domain_scores_by_domain:
             worst_domain = min(domain_scores_by_domain, key=domain_scores_by_domain.get)
-            worst_df     = [f for f in domain_findings if f.domain == worst_domain]
-            _, worst_bd  = _compute_score(worst_df, CHECK_WEIGHTS)
+            worst_df = [f for f in domain_findings if f.domain == worst_domain]
+            _, worst_bd = _compute_score(worst_df, CHECK_WEIGHTS)
             penalty_breakdown = worst_bd + tenant_breakdown
 
         return {
-            "score":            score,
-            "grade":            _grade(score),
-            "platform":         platform,
-            "domains_scanned":  domains,
+            "score": score,
+            "grade": _grade(score),
+            "platform": platform,
+            "domains_scanned": domains,
             "penalty_breakdown": penalty_breakdown,
-            "findings":         [f.dict() for f in self.findings],
+            "findings": [f.dict() for f in self.findings],
+            "benchmark_results": [_serialize_benchmark_result(result) for result in benchmark_results],
+            "benchmark_findings": benchmark_findings,
         }
 

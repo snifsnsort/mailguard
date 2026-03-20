@@ -21,7 +21,8 @@ def get_db():
 
 
 def init_db():
-    from app.models import tenant, scan, setting, aggressive_scan  # noqa – registers models
+    from app.models import tenant, scan, setting, aggressive_scan, scan_schedule  # noqa - registers models
+    import app.models.v2.job  # noqa - registers v2 ScanJob/ScanTask with Base
     Base.metadata.create_all(bind=engine)
     _migrate()
 
@@ -29,12 +30,14 @@ def init_db():
 def _migrate():
     """Add missing columns to existing tables. Safe to run on every startup."""
     migrations = [
-        ("scans",   "domains_scanned",   "TEXT DEFAULT '[]'"),
-        ("scans",   "penalty_breakdown", "TEXT DEFAULT '[]'"),
-        ("scans",   "error",             "TEXT"),
-        ("scans",   "platform",          "TEXT DEFAULT 'Microsoft 365'"),
-        ("tenants", "extra_domains",     "TEXT DEFAULT '[]'"),
-        ("tenants", "user_id",           "TEXT"),
+        ("scans", "domains_scanned", "TEXT DEFAULT '[]'"),
+        ("scans", "penalty_breakdown", "TEXT DEFAULT '[]'"),
+        ("scans", "error", "TEXT"),
+        ("scans", "platform", "TEXT DEFAULT 'Microsoft 365'"),
+        ("scans", "benchmark_results", "TEXT DEFAULT '[]'"),
+        ("scans", "benchmark_findings", "TEXT DEFAULT '{}'"),
+        ("tenants", "extra_domains", "TEXT DEFAULT '[]'"),
+        ("tenants", "user_id", "TEXT"),
         ("tenants", "gws_refresh_token", "TEXT"),
     ]
     with engine.connect() as conn:
@@ -44,4 +47,4 @@ def _migrate():
                 conn.commit()
                 print(f"[migrate] Added column {table}.{column}")
             except Exception:
-                pass  # Column already exists — expected on subsequent starts
+                pass
